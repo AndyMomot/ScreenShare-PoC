@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Support Console</title>
+<script src="https://cdn.jsdelivr.net/npm/livekit-client@2.23.0/dist/livekit-client.umd.js"></script>
+<style>
+  :root { --bg:#f4f5f7; --panel:#fff; --text:#1d1f23; --muted:#6b7280; --accent:#2563eb; --danger:#dc2626; --ok:#16a34a; --border:#e5e7eb; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#111317; --panel:#1b1e24; --text:#e8eaed; --muted:#9aa0a6; --border:#2c313a; } }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:-apple-system,system-ui,sans-serif; background:var(--bg); color:var(--text); }
+  main { display:grid; grid-template-columns:auto 380px; gap:16px; padding:16px; height:100vh; }
+  .stage { display:flex; flex-direction:column; align-items:center; gap:8px; min-width:0; }
+  video { height:calc(100vh - 80px); max-width:100%; aspect-ratio:9/19.5; background:#000; border-radius:24px; object-fit:contain; cursor:crosshair; }
+  .clock { font:700 28px ui-monospace,monospace; }
+  aside { background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:16px; overflow:auto; display:flex; flex-direction:column; gap:12px; }
+  h2 { font-size:13px; text-transform:uppercase; color:var(--muted); margin:8px 0 0; letter-spacing:.04em; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; }
+  button { font:inherit; padding:8px 12px; border-radius:8px; border:1px solid var(--border); background:var(--panel); color:var(--text); cursor:pointer; }
+  button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+  button.danger { background:var(--danger); color:#fff; border-color:var(--danger); }
+  input[type=text] { flex:1; padding:8px; border-radius:8px; border:1px solid var(--border); background:var(--bg); color:var(--text); font:inherit; }
+  .status { font-weight:600; }
+  table { width:100%; border-collapse:collapse; font:13px ui-monospace,monospace; }
+  td { padding:3px 0; } td:last-child { text-align:right; }
+  #log { font:12px ui-monospace,monospace; white-space:pre-wrap; color:var(--muted); max-height:240px; overflow:auto; }
+  .screen { position:relative; display:flex; }
+  .overlay { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px;
+             color:#fff; text-align:center; padding:24px; border-radius:24px; pointer-events:none; font-size:18px; }
+  .overlay small { color:#b8bcc4; font-size:14px; }
+  .overlay[hidden] { display:none; }
+  .spinner { width:28px; height:28px; border:3px solid #ffffff40; border-top-color:#fff; border-radius:50%; animation:spin 1s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .pills { display:flex; gap:8px; flex-wrap:wrap; }
+  .pill { display:inline-flex; align-items:center; gap:8px; padding:6px 12px; border-radius:999px; border:1px solid var(--border); font-weight:600; font-size:14px; }
+  .dot { width:10px; height:10px; border-radius:50%; background:var(--muted); }
+  .dot.ok { background:var(--ok); } .dot.warn { background:#f59e0b; } .dot.bad { background:var(--danger); }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  @media (max-width:900px) { main { grid-template-columns:1fr; height:auto; } video { height:70vh; } }
+</style>
+</head>
+<body>
+<main>
+  <section class="stage">
+    <div class="clock" id="clock">--:--:--.---</div>
+    <div class="screen">
+      <video id="video" autoplay playsinline muted></video>
+      <div class="overlay" id="overlay"><div class="spinner"></div><div id="overlayTitle">Connecting…</div><small id="overlayHint"></small></div>
+    </div>
+  </section>
+  <aside>
+    <div class="pills">
+      <span class="pill"><span class="dot" id="connDot"></span><span id="conn">Server: connecting</span></span>
+      <span class="pill"><span class="dot" id="driverDot"></span><span id="driver">Driver: offline</span></span>
+    </div>
+    <div>Session: <span class="status" id="session">idle</span></div>
+
+    <h2>Session</h2>
+    <div class="row">
+      <button id="reqApp">Request · app</button>
+      <button id="reqDevice">Request · device</button>
+      <button class="danger" id="end">End</button>
+    </div>
+
+    <h2>Control</h2>
+    <div class="row">
+      <button id="reqControl">Request control</button>
+      <label><input type="radio" name="mode" value="tap" checked> Tap / swipe</label>
+      <label><input type="radio" name="mode" value="pointer"> Pointer</label>
+    </div>
+    <div class="row">
+      <button id="back">Back</button>
+      <button id="swipeUp">Scroll ↓</button>
+      <button id="swipeDown">Scroll ↑</button>
+    </div>
+    <div class="row"><input type="text" id="text" placeholder="Text to type in the focused field"><button id="sendText">Type</button></div>
+    <div>Last command: <span id="ack">—</span></div>
+
+    <h2>Stream · browser (receiver)</h2>
+    <table id="stats"></table>
+
+    <h2>Stream · phone (sender)</h2>
+    <table id="senderStats"><tr><td>Waiting for the phone…</td><td></td></tr></table>
+
+    <h2>Log</h2>
+    <div id="log"></div>
+  </aside>
+</main>
+<script>
+const { Room, RoomEvent } = LivekitClient;
+const $ = (id) => document.getElementById(id);
+const video = $('video');
+const encoder = new TextEncoder();
+const decoder = new TextDecoder();
+
+let room = null;
+let videoTrack = null;
+let nextId = 1;
+let prevStats = null;
+let firstStats = null;
+let pointerMode = false;
+let lastPointerAt = 0;
+let down = null;
+
+function log(line) {
+  const time = new Date().toLocaleTimeString();
+  $('log').textContent = `${time} ${line}\n` + $('log').textContent.slice(0, 8000);
+  diag(line);
+}
+
+// Diagnostics: every line also goes to the server's logs/poc.log, next to the app's lines.
+let diagPending = [];
+function diag(line) { diagPending.push(`[${identity}] ${line}`); }
+setInterval(() => {
+  if (!diagPending.length) return;
+  const lines = diagPending; diagPending = [];
+  fetch('/log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source: 'web', lines }) })
+    .catch(() => { diagPending = lines.concat(diagPending); });
+}, 1000);
+window.addEventListener('error', (e) => diag(`JS error: ${e.message} at ${e.filename}:${e.lineno}`));
+window.addEventListener('unhandledrejection', (e) => diag(`unhandled rejection: ${e.reason}`));
+const sentAt = new Map();  // command id → send time, for round-trip of acks
+let pointerCount = 0;
+
+// The iOS app joins as "driver", the Android app as "driver-android"; run one of them at a time.
+const isDriver = (identity) => identity.startsWith('driver');
+// A unique identity per tab: LiveKit disconnects an older participant with the same identity.
+const identity = `support-${Math.random().toString(36).slice(2, 7)}`;
+let sessionPhase = 'idle';   // idle | requested | accepted | streaming | ended
+let retryTimer = null;
+let retryDelay = 1000;
+
+function driverOnline() {
+  return !!room && [...room.remoteParticipants.values()].some((p) => isDriver(p.identity));
+}
+
+/** One place that turns connection + presence + session into what the support person sees. */
+function render() {
+  const connected = room?.state === 'connected';
+  const online = connected && driverOnline();
+  $('connDot').className = 'dot ' + (connected ? 'ok' : room?.state === 'reconnecting' ? 'warn' : 'bad');
+  $('conn').textContent = `Server: ${connected ? 'connected' : room?.state ?? 'connecting'}`;
+  $('driverDot').className = 'dot ' + (online ? 'ok' : 'bad');
+  $('driver').textContent = `Driver: ${online ? 'online' : 'offline'}`;
+  ['reqApp', 'reqDevice'].forEach((id) => $(id).disabled = !online || sessionPhase === 'requested' || sessionPhase === 'streaming');
+  ['end', 'reqControl', 'back', 'swipeUp', 'swipeDown', 'sendText'].forEach((id) => $(id).disabled = sessionPhase !== 'streaming' && sessionPhase !== 'accepted');
+
+  const playing = !!videoTrack;
+  let title = '', hint = '', spin = false;
+  if (!connected) { title = 'Connecting to the server…'; spin = true; }
+  else if (!online) { title = 'Driver is offline'; hint = 'Waiting for the driver app to come online'; spin = true; }
+  else if (sessionPhase === 'requested') { title = 'Waiting for the driver to accept…'; spin = true; }
+  else if (sessionPhase === 'accepted' && !playing) { title = 'Driver accepted'; hint = 'Waiting for the screen…'; spin = true; }
+  else if (!playing) { title = 'Driver is online'; hint = 'Press “Request · app” or “Request · device”'; }
+  $('overlay').hidden = playing && online;
+  $('overlay').querySelector('.spinner').style.display = spin ? '' : 'none';
+  $('overlayTitle').textContent = title;
+  $('overlayHint').textContent = hint;
+}
+
+function scheduleReconnect() {
+  clearTimeout(retryTimer);
+  retryTimer = setTimeout(() => connect().catch((e) => { log(`connect failed: ${e.message}`); scheduleReconnect(); }), retryDelay);
+  retryDelay = Math.min(retryDelay * 2, 10000);
+}
+
+async function connect() {
+  const token = await (await fetch(`/token?identity=${identity}&name=Support&room=demo`)).text();
+  room = new Room({ adaptiveStream: false });
+  room.on(RoomEvent.Disconnected, () => {
+    log('disconnected from server, retrying');
+    videoTrack = null; video.srcObject = null; sessionPhase = 'idle';
+    render(); scheduleReconnect();
+  });
+  room.on(RoomEvent.TrackSubscribed, (track) => {
+    if (track.kind !== 'video') return;
+    videoTrack = track;
+    lowLatency(track);
+    track.attach(video);
+    prevStats = firstStats = null;
+    sessionPhase = 'streaming';
+    log(`video track subscribed from ${track.sid ?? '?'}`);
+    render();
+  });
+  room.on(RoomEvent.TrackUnsubscribed, (track) => {
+    if (track === videoTrack) { videoTrack = null; video.srcObject = null; log('video track gone'); render(); }
+  });
+  room.on(RoomEvent.ParticipantConnected, (p) => { log(`${p.identity} joined`); render(); });
+  room.on(RoomEvent.ParticipantDisconnected, (p) => {
+    log(`${p.identity} left`);
+    if (isDriver(p.identity)) { sessionPhase = 'idle'; $('session').textContent = 'driver went offline'; }
+    render();
+  });
+  room.on(RoomEvent.ConnectionStateChanged, (state) => { log(`server connection: ${state}`); render(); });
+  room.on(RoomEvent.TrackMuted, (pub, p) => log(`track muted by ${p.identity}`));
+  room.on(RoomEvent.TrackUnmuted, (pub, p) => log(`track unmuted by ${p.identity}`));
+  room.on(RoomEvent.DataReceived, (payload) => handle(decoder.decode(payload)));
+  await room.connect(`ws://${location.hostname}:7880`, token);
+  retryDelay = 1000;
+  log(`joined as ${identity}`);
+  render();
+}
+
+/** Ask WebRTC to play frames as soon as they decode instead of buffering for smoothness. */
+function lowLatency(track) {
+  if (track.receiver && 'jitterBufferTarget' in track.receiver) {
+    track.receiver.jitterBufferTarget = 0;
+    log('jitter buffer target set to 0 ms');
+  } else {
+    log('jitterBufferTarget not supported by this browser');
+  }
+}
+
+function send(message, reliable = true) {
+  if (!room) return log('not connected');
+  room.localParticipant.publishData(encoder.encode(JSON.stringify(message)), { reliable });
+  if (message.id != null) sentAt.set(message.id, performance.now());
+  if (message.type !== 'pointer') log(`→ ${JSON.stringify(message)}`);
+  else if (++pointerCount % 20 === 1) diag(`pointer moves sent: ${pointerCount}`);
+}
+
+function showSenderStats(m) {
+  const f = (v, digits = 0, unit = '') => v == null ? '—' : `${Number(v).toFixed(digits)}${unit}`;
+  const rows = [
+    ['Limited by', m.limitation === 'none' ? 'nothing' : m.limitation],
+    ['Sent', `${f(m.kbps)} kbit/s · target ${f(m.targetKbps)} · retransmit ${f(m.retransmitKbps)}`],
+    ['Uplink estimate', f(m.uplinkKbps, 0, ' kbit/s')],
+    ['Encoder', `${f(m.fps, 1)} fps · ${m.width}×${m.height} · ${f(m.encodeMs, 1, ' ms/frame')}`],
+    ['Send delay (pacer)', f(m.sendDelayMs, 0, ' ms')],
+    ['Loss phone → server', f(m.lossPercent, 1, ' %')],
+    ['RTT phone ↔ server', f(m.rttMs, 0, ' ms')],
+    ['Encoder impl', m.encoder],
+  ];
+  $('senderStats').innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
+}
+
+let senderStatsCount = 0;
+function handle(text) {
+  const message = JSON.parse(text);
+  if (message.type === 'sender_stats') {
+    if (++senderStatsCount % 5 === 0) diag(`sender ${text}`);
+    return showSenderStats(message);
+  }
+  if (message.type === 'ack' && sentAt.has(message.id)) {
+    log(`← ${text} · round trip ${(performance.now() - sentAt.get(message.id)).toFixed(0)} ms`);
+    sentAt.delete(message.id);
+  } else {
+    log(`← ${text}`);
+  }
+  switch (message.type) {
+    case 'accept': sessionPhase = 'accepted'; $('session').textContent = 'accepted, waiting for video'; break;
+    case 'decline': sessionPhase = 'idle'; $('session').textContent = `declined (${message.reason})`; break;
+    case 'end': sessionPhase = 'idle'; $('session').textContent = `ended by ${message.by}`; break;
+    case 'status': $('session').textContent = `${message.state} · control ${message.controlEnabled ? 'ON' : 'off'}`; break;
+    case 'ack': $('ack').textContent = `#${message.id} ${message.ok ? 'ok' : 'failed: ' + message.detail}`; break;
+  }
+  render();
+}
+
+/** Click position → 0..1 of the video frame, honoring object-fit: contain letterboxing. */
+function normalized(event) {
+  const rect = video.getBoundingClientRect();
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if (!vw || !vh) return null;
+  const scale = Math.min(rect.width / vw, rect.height / vh);
+  const w = vw * scale, h = vh * scale;
+  const x = (event.clientX - rect.left - (rect.width - w) / 2) / w;
+  const y = (event.clientY - rect.top - (rect.height - h) / 2) / h;
+  if (x < 0 || x > 1 || y < 0 || y > 1) return null;
+  return { x, y };
+}
+
+video.addEventListener('mousedown', (e) => { down = { e, p: normalized(e) }; });
+video.addEventListener('mouseup', (e) => {
+  const start = down; down = null;
+  const end = normalized(e);
+  if (!start?.p || !end) return;
+  const moved = Math.hypot(e.clientX - start.e.clientX, e.clientY - start.e.clientY);
+  if (pointerMode) return send({ type: 'pointer', x: end.x, y: end.y }, false);
+  if (moved < 8) diag(`click at ${end.x.toFixed(3)}, ${end.y.toFixed(3)} of the video`);
+  if (moved < 8) send({ type: 'tap', id: nextId++, x: end.x, y: end.y });
+  else send({ type: 'swipe', id: nextId++, x1: start.p.x, y1: start.p.y, x2: end.x, y2: end.y, ms: 300 });
+});
+video.addEventListener('mousemove', (e) => {
+  if (!pointerMode || performance.now() - lastPointerAt < 50) return;
+  const p = normalized(e);
+  if (!p) return;
+  lastPointerAt = performance.now();
+  send({ type: 'pointer', x: p.x, y: p.y }, false);
+});
+
+document.addEventListener('click', (e) => {
+  const b = e.target.closest('button');
+  if (b) diag(`button "${b.textContent.trim()}"`);
+});
+video.addEventListener('resize', () => log(`video size ${video.videoWidth}×${video.videoHeight}`));
+document.addEventListener('visibilitychange', () => diag(`page ${document.visibilityState}`));
+
+function request(mode) {
+  send({ type: 'request', supportName: 'Support', mode });
+  sessionPhase = 'requested';
+  $('session').textContent = 'requested, waiting for driver';
+  render();
+}
+$('reqApp').onclick = () => request('app');
+$('reqDevice').onclick = () => request('device');
+$('end').onclick = () => { send({ type: 'end', by: 'support' }); sessionPhase = 'idle'; $('session').textContent = 'ended by support'; render(); };
+$('reqControl').onclick = () => send({ type: 'control_request' });
+$('back').onclick = () => send({ type: 'back', id: nextId++ });
+$('swipeUp').onclick = () => send({ type: 'swipe', id: nextId++, x1: 0.5, y1: 0.75, x2: 0.5, y2: 0.35, ms: 300 });
+$('swipeDown').onclick = () => send({ type: 'swipe', id: nextId++, x1: 0.5, y1: 0.35, x2: 0.5, y2: 0.75, ms: 300 });
+$('sendText').onclick = () => { send({ type: 'text', id: nextId++, value: $('text').value }); $('text').value = ''; };
+document.querySelectorAll('input[name=mode]').forEach((r) => r.onchange = () => { pointerMode = r.value === 'pointer' && r.checked; });
+
+render();
+connect().catch((e) => { log(`connect failed: ${e.message}`); scheduleReconnect(); });
+
+function tick() {
+  const d = new Date();
+  $('clock').textContent = d.toTimeString().slice(0, 8) + '.' + String(d.getMilliseconds()).padStart(3, '0');
+  requestAnimationFrame(tick);
+}
+tick();
+
+/** Raw WebRTC stats of the received screen: traffic, smoothness and the receiver-side part of latency. */
+async function readStats() {
+  const report = await videoTrack.receiver.getStats();
+  const out = { timestamp: performance.now() };
+  report.forEach((s) => {
+    if (s.type === 'inbound-rtp' && s.kind === 'video') Object.assign(out, {
+      bytes: s.bytesReceived, frames: s.framesDecoded, width: s.frameWidth, height: s.frameHeight,
+      lost: s.packetsLost, freezes: s.freezeCount ?? 0, freezeSec: s.totalFreezesDuration ?? 0,
+      jitterBufferMs: s.jitterBufferEmittedCount ? (s.jitterBufferDelay / s.jitterBufferEmittedCount) * 1000 : null,
+      decodeMs: s.framesDecoded ? (s.totalDecodeTime / s.framesDecoded) * 1000 : null,
+      decoder: s.decoderImplementation, codecId: s.codecId,
+    });
+    if (s.type === 'candidate-pair' && s.nominated) out.rttMs = (s.currentRoundTripTime ?? 0) * 1000;
+  });
+  if (out.codecId) out.codec = report.get(out.codecId)?.mimeType;
+  return out;
+}
+
+let receiverStatsCount = 0;
+setInterval(async () => {
+  if (!videoTrack?.receiver) return;
+  const s = await readStats();
+  if (s.bytes == null) return;
+  if (!firstStats) firstStats = s;
+  const rows = [];
+  if (prevStats) {
+    const seconds = (s.timestamp - prevStats.timestamp) / 1000;
+    const kbps = ((s.bytes - prevStats.bytes) * 8) / seconds / 1000;
+    const fps = (s.frames - prevStats.frames) / seconds;
+    const minutes = (s.timestamp - firstStats.timestamp) / 60000;
+    const totalMb = (s.bytes - firstStats.bytes) / 1e6;
+    rows.push(['Bitrate now', `${kbps.toFixed(0)} kbit/s (${(kbps * 60 / 8 / 1000).toFixed(2)} MB/min)`]);
+    rows.push(['Average', minutes > 0.05 ? `${(totalMb / minutes).toFixed(2)} MB/min` : '—']);
+    rows.push(['Total', `${totalMb.toFixed(1)} MB in ${minutes.toFixed(1)} min`]);
+    rows.push(['FPS', fps.toFixed(1)]);
+  }
+  rows.push(['Resolution', `${s.width ?? '?'}×${s.height ?? '?'}`]);
+  rows.push(['Network RTT', s.rttMs != null ? `${s.rttMs.toFixed(0)} ms` : '—']);
+  rows.push(['Jitter buffer', s.jitterBufferMs != null ? `${s.jitterBufferMs.toFixed(0)} ms` : '—']);
+  rows.push(['Decode', s.decodeMs != null ? `${s.decodeMs.toFixed(1)} ms/frame` : '—']);
+  rows.push(['Freezes', `${s.freezes} (${s.freezeSec.toFixed(1)} s)`]);
+  rows.push(['Packets lost', `${s.lost ?? 0}`]);
+  rows.push(['Codec', `${s.codec ?? '?'} (${s.decoder ?? '?'})`]);
+  if (++receiverStatsCount % 5 === 0) diag('receiver ' + rows.map(([k, v]) => `${k}: ${v}`).join(' | '));
+  $('stats').innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
+  prevStats = s;
+}, 1000);
+</script>
+</body>
+</html>

@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="control_service_description">Lets support tap, scroll and type on this device during a screen sharing session you accepted. It does nothing outside a session with control allowed.</string>
+</resources>
