@@ -128,7 +128,7 @@ object PocSession : ScreenShareEngine {
         joining = scope.launch {
             try {
                 val token = withContext(Dispatchers.IO) {
-                    val connection = URL("http://$target:8080/token?identity=driver-android&name=Driver&room=demo")
+                    val connection = URL("http://$target:8080/token?identity=${if (isEmulator) "driver-android-emu" else "driver-android"}&name=Driver&room=demo")
                         .openConnection() as HttpURLConnection
                     connection.connectTimeout = 5000
                     connection.readTimeout = 5000

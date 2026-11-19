@@ -1,8 +1,10 @@
+// The iOS Simulator SDK has no ScreenCaptureKit; there the app falls back to ReplayKit.
+#if canImport(ScreenCaptureKit)
 import CoreMedia
 import ScreenCaptureKit
 import UIKit
 
-/// Whole-device capture through ScreenCaptureKit (iOS 27+), without a broadcast extension.
+/// Screen capture through ScreenCaptureKit (iOS 27+): the whole device or only this app, without a broadcast extension.
 /// Frames go to our own pipeline as whole buffers: LiveKit's ScreenCaptureKit capturer crops each
 /// frame by the reported content rectangle, and on iOS that crop can run past the buffer and crash
 /// inside libyuv (SplitUVRow_NEON).
@@ -12,12 +14,15 @@ final class DeviceCapture: NSObject, SCContentSharingPickerObserver, SCStreamOut
     private let height: Int
     private let onFrame: (CVPixelBuffer, CMTime) -> Void
     private let onStop: (Error) -> Void
+    private let appOnly: Bool
     private let queue = DispatchQueue(label: "device-capture")
     private var stream: SCStream?
     private var pick: CheckedContinuation<SCContentFilter, Error>?
 
     /// - Parameter maxLongSide: the long side of delivered frames; the system scales to it.
-    init(maxLongSide: Int, onFrame: @escaping (CVPixelBuffer, CMTime) -> Void, onStop: @escaping (Error) -> Void) {
+    /// - Parameter appOnly: true offers only this app in the system picker; false lets the driver share the whole screen.
+    init(maxLongSide: Int, appOnly: Bool = false, onFrame: @escaping (CVPixelBuffer, CMTime) -> Void, onStop: @escaping (Error) -> Void) {
+        self.appOnly = appOnly
         let native = UIScreen.main.nativeBounds.size
         let scale = min(1, Double(maxLongSide) / Double(max(native.width, native.height)))
         // Even sizes keep the 4:2:0 chroma planes whole.
@@ -59,7 +64,7 @@ final class DeviceCapture: NSObject, SCContentSharingPickerObserver, SCStreamOut
             pick = continuation
             picker.add(self)
             picker.isActive = true
-            picker.present()
+            if appOnly { picker.presentForCurrentApplication() } else { picker.present() }
         }
     }
 
@@ -122,3 +127,4 @@ final class DeviceCapture: NSObject, SCContentSharingPickerObserver, SCStreamOut
         }
     }
 }
+#endif

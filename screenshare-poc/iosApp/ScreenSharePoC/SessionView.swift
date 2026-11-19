@@ -19,6 +19,13 @@ struct SessionView: View {
                         ForEach(StreamProfile.allCases) { Text($0.title).tag($0) }
                     }
                     .disabled(session.streaming != nil)
+                    Picker("Capture API", selection: $session.captureAPI) {
+                        ForEach(CaptureAPI.allCases) { Text($0.title).tag($0) }
+                    }
+                    .disabled(session.streaming != nil)
+                    Picker("Remote control", selection: $session.controlMode) {
+                        ForEach(ControlMode.allCases) { Text($0.title).tag($0) }
+                    }
                     LabeledContent("Server") {
                         TextField(session.discovered.map { "Auto · \($0.host)" } ?? "Auto", text: $hostDraft)
                             .multilineTextAlignment(.trailing)
@@ -34,7 +41,7 @@ struct SessionView: View {
                 } header: {
                     Text("Settings")
                 } footer: {
-                    Text("Quality applies to the next session. Leave Server empty to find the Mac running run.sh automatically.")
+                    Text("Quality and capture API apply to the next session. Remote control switches at once: App Store keeps to public APIs (SwiftUI and alert buttons cannot be pressed), Full adds them through private APIs that App Review rejects. Leave Server empty to find the Mac running run.sh automatically.")
                 }
 
                 Section {

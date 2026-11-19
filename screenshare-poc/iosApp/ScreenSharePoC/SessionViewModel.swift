@@ -20,6 +20,18 @@ final class SessionViewModel: ObservableObject {
         didSet { UserDefaults.standard.set(manualHost, forKey: "manualHost") }
     }
     @Published private(set) var discovered: ServerDiscovery.Server?
+    @Published var controlMode: ControlMode = ControlMode.current {
+        didSet {
+            ControlMode.current = controlMode
+            announceControlMode()
+        }
+    }
+    @Published var captureAPI: CaptureAPI = CaptureAPI.current {
+        didSet {
+            CaptureAPI.current = captureAPI
+            DiagLog.shared.log("driver", "capture API → \(captureAPI.rawValue)")
+        }
+    }
     @Published var profile: StreamProfile = .smooth {
         didSet {
             engine.profile = profile
@@ -188,8 +200,19 @@ final class SessionViewModel: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(delay), execute: work)
     }
 
+    /// One identity per installation: two apps joining as the same participant (a phone and a
+    /// simulator, say) would keep disconnecting each other. The support page accepts any "driver-…".
+    private static let identity: String = {
+        let id = UIDevice.current.identifierForVendor?.uuidString.prefix(5).lowercased() ?? "x"
+        #if targetEnvironment(simulator)
+        return "driver-sim-\(id)"
+        #else
+        return "driver-\(id)"
+        #endif
+    }()
+
     private func fetchToken(host: String) async throws -> String {
-        guard let url = URL(string: "http://\(host):8080/token?identity=driver&name=Driver&room=demo") else {
+        guard let url = URL(string: "http://\(host):8080/token?identity=\(Self.identity)&name=Driver&room=demo") else {
             throw URLError(.badURL)
         }
         var request = URLRequest(url: url)
@@ -203,10 +226,18 @@ final class SessionViewModel: ObservableObject {
     /// An ended session clears itself so the next request can arrive without any taps.
     private func sessionChanged(_ newState: SessionState) {
         DiagLog.shared.log("session", "\(state) → \(newState)")
+        let wasStreaming = state is SessionStateStreaming
         state = newState
+        if newState is SessionStateStreaming, !wasStreaming { announceControlMode() }
         if newState is SessionStateEnded {
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.controller.reset() }
         }
+    }
+
+    /// Tells the support page which control this build offers; the page shows it next to the controls.
+    private func announceControlMode() {
+        guard streaming != nil else { return }
+        engine.sendMessage(json: #"{"type":"control_mode","mode":"\#(controlMode.rawValue)"}"#, reliable: true)
     }
 
     private func captureInterrupted() {

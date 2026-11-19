@@ -33,7 +33,7 @@ a Homebrew `livekit-server` or `xcodegen` on PATH is used instead when present).
 ```
 The emulator reaches the Mac at `10.0.2.2` (no setup); a phone on the same Wi-Fi finds it by Bonjour.
 Remote control needs a one-time switch: Settings → Accessibility → "ScreenShare PoC remote control" → On.
-Run one driver app at a time (iOS joins as `driver`, Android as `driver-android`).
+Every install joins under its own name (`driver-…`). A request reaches every driver app online, so keep one running for a demo.
 
 Android 15+ hides the whole app from screen sharing while a password field is on screen
 ("App content hidden from screen share for security"); the demo shows it with "Show / hide password field".

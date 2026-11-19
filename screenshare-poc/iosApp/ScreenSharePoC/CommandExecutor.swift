@@ -10,7 +10,7 @@ final class CommandExecutor {
     private weak var lastWebView: WKWebView?
 
     init() {
-        AccessibilityEnabler.enable()
+        if ControlMode.current == .full { AccessibilityEnabler.set(true) }
     }
 
     func execute(_ command: ControlCommand) -> String? {
@@ -55,6 +55,10 @@ final class CommandExecutor {
                 return tapInWeb(webView, at: window.convert(p, to: webView))
             }
             if String(describing: type(of: current)).contains("AlertControllerActionView") {
+                guard ControlMode.current == .full else {
+                    Self.trace("alert button: blocked in App Store mode")
+                    return ControlMode.blockedReason("alert buttons")
+                }
                 return tapAlertAction(view: current, in: window)
             }
             if let control = current as? UIControl, control.isEnabled {
@@ -69,6 +73,13 @@ final class CommandExecutor {
                 return nil
             }
             view = current.superview
+        }
+
+        // Without assistive technology SwiftUI exposes no element to activate, and turning it on takes a
+        // private API: in the App Store build a SwiftUI button simply cannot be pressed remotely.
+        guard ControlMode.current == .full else {
+            Self.trace("SwiftUI element: blocked in App Store mode · hit chain: \(Self.chain(from: hit))")
+            return ControlMode.blockedReason("SwiftUI buttons and list rows")
         }
 
         // SwiftUI content has no UIControl per button: activate an accessibility element under the point.
@@ -381,11 +392,7 @@ extension UIResponder {
 /// buttons in SwiftUI lists have no element to activate. The automation switch (what UI tests
 /// use) turns it on for this process. Private API — PoC only, not for the App Store.
 enum AccessibilityEnabler {
-    private static var done = false
-
-    static func enable() {
-        guard !done else { return }
-        done = true
+    static func set(_ enabled: Bool) {
         guard let library = dlopen("/usr/lib/libAccessibility.dylib", RTLD_NOW) else {
             DiagLog.shared.log("control", "accessibility: libAccessibility not loaded")
             return
@@ -393,11 +400,44 @@ enum AccessibilityEnabler {
         typealias Setter = @convention(c) (Bool) -> Void
         for name in ["_AXSSetAutomationEnabled", "_AXSApplicationAccessibilitySetEnabled"] {
             if let symbol = dlsym(library, name) {
-                unsafeBitCast(symbol, to: Setter.self)(true)
-                DiagLog.shared.log("control", "accessibility: \(name)(true) called")
+                unsafeBitCast(symbol, to: Setter.self)(enabled)
+                DiagLog.shared.log("control", "accessibility: \(name)(\(enabled)) called")
             } else {
                 DiagLog.shared.log("control", "accessibility: \(name) not found")
             }
         }
+    }
+}
+
+/// Which remote control the app offers, to show side by side what passes App Review and what does not.
+/// - appStore: public APIs only — UIKit controls, text fields, scrolling, web content, Back, pointer.
+/// - full: adds SwiftUI buttons and system alert buttons through private APIs (rejected under guideline 2.5.1).
+/// A real App Store build must not contain the private code at all, not just have it switched off.
+enum ControlMode: String, CaseIterable, Identifiable {
+    case appStore = "app_store"
+    case full
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .appStore: "App Store (public APIs)"
+        case .full: "Full (private APIs)"
+        }
+    }
+
+    private static let key = "controlMode"
+
+    static var current: ControlMode {
+        get { UserDefaults.standard.string(forKey: key).flatMap(ControlMode.init) ?? .appStore }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: key)
+            AccessibilityEnabler.set(newValue == .full)
+            DiagLog.shared.log("control", "control mode → \(newValue.rawValue)")
+        }
+    }
+
+    static func blockedReason(_ what: String) -> String {
+        "\(what) need a private API — not available in the App Store build"
     }
 }

@@ -75,6 +75,7 @@
       <button id="swipeDown">Scroll ↑</button>
     </div>
     <div class="row"><input type="text" id="text" placeholder="Text to type in the focused field"><button id="sendText">Type</button></div>
+    <div>Phone control mode: <span id="ctlMode">—</span></div>
     <div>Last command: <span id="ack">—</span></div>
 
     <h2>Stream · browser (receiver)</h2>
@@ -123,7 +124,8 @@ window.addEventListener('unhandledrejection', (e) => diag(`unhandled rejection: 
 const sentAt = new Map();  // command id → send time, for round-trip of acks
 let pointerCount = 0;
 
-// The iOS app joins as "driver", the Android app as "driver-android"; run one of them at a time.
+// Driver apps join as "driver-…" (one identity per install). A request goes to every driver online,
+// so keep one driver app running for a demo.
 const isDriver = (identity) => identity.startsWith('driver');
 // A unique identity per tab: LiveKit disconnects an older participant with the same identity.
 const identity = `support-${Math.random().toString(36).slice(2, 7)}`;
@@ -189,7 +191,7 @@ async function connect() {
   room.on(RoomEvent.ParticipantConnected, (p) => { log(`${p.identity} joined`); render(); });
   room.on(RoomEvent.ParticipantDisconnected, (p) => {
     log(`${p.identity} left`);
-    if (isDriver(p.identity)) { sessionPhase = 'idle'; $('session').textContent = 'driver went offline'; }
+    if (isDriver(p.identity) && !driverOnline()) { sessionPhase = 'idle'; $('session').textContent = 'driver went offline'; }
     render();
   });
   room.on(RoomEvent.ConnectionStateChanged, (state) => { log(`server connection: ${state}`); render(); });
@@ -253,6 +255,12 @@ function handle(text) {
     case 'decline': sessionPhase = 'idle'; $('session').textContent = `declined (${message.reason})`; break;
     case 'end': sessionPhase = 'idle'; $('session').textContent = `ended by ${message.by}`; break;
     case 'status': $('session').textContent = `${message.state} · control ${message.controlEnabled ? 'ON' : 'off'}`; break;
+    case 'control_mode':
+      $('ctlMode').textContent = message.mode === 'full'
+        ? 'Full — private APIs, would be rejected by the App Store'
+        : 'App Store — public APIs only (no SwiftUI or alert buttons)';
+      $('ctlMode').style.color = message.mode === 'full' ? '#ff9f0a' : '#30d158';
+      break;
     case 'ack': $('ack').textContent = `#${message.id} ${message.ok ? 'ok' : 'failed: ' + message.detail}`; break;
   }
   render();

@@ -51,12 +51,19 @@ final class AppScreenSource {
 
     /// Starts capture and returns once the first frame reached the track:
     /// LiveKit needs one frame to know the dimensions before the track can be published.
-    func start(device: Bool) async throws {
-        mode = device ? "device" : "app"
+    func start(device: Bool, api: CaptureAPI = .current) async throws {
+        let useScreenCaptureKit = api.usesScreenCaptureKit(device: device)
+        mode = (device ? "device" : "app") + (useScreenCaptureKit ? "·ScreenCaptureKit" : "·ReplayKit")
         DiagLog.shared.log("capture", "\(mode) start · maxLongSide \(maxLongSide) · fps cap \(Int((1 / minFrameInterval).rounded()))")
-        if device, #available(iOS 27.0, *) {
-            try await startDevice()
+        if useScreenCaptureKit, #available(iOS 27.0, *) {
+            #if canImport(ScreenCaptureKit)
+            try await startScreenCaptureKit(appOnly: !device)
+            #endif
         } else {
+            if device {
+                // Whole-device capture before iOS 27 needs a Broadcast Upload Extension with an App Group.
+                DiagLog.shared.log("capture", "device mode without ScreenCaptureKit → broadcast extension not in this PoC, capturing this app only")
+            }
             try await startApp()
             observeReturnToForeground()
         }
@@ -89,31 +96,39 @@ final class AppScreenSource {
         }
     }
 
+    /// ReplayKit may accept the start and then never deliver a frame (the iOS Simulator does this),
+    /// which would leave the session "streaming" with no picture; give up after a few seconds instead.
     private func startApp() async throws {
+        let once = OnceFlag()
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            var resumed = false
             RPScreenRecorder.shared().startCapture(handler: { [weak self] sampleBuffer, type, error in
                 guard error == nil, type == .video, let self,
                       let source = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
                 self.queue.sync { self.deliver(source, at: CMSampleBufferGetPresentationTimeStamp(sampleBuffer)) }
-                if !resumed {
-                    resumed = true
-                    continuation.resume()
-                }
+                if once.claim() { continuation.resume() }
             }, completionHandler: { error in
-                if let error, !resumed {
-                    resumed = true
-                    continuation.resume(throwing: error)
-                }
+                if let error, once.claim() { continuation.resume(throwing: error) }
             })
+            DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
+                guard once.claim() else { return }
+                DiagLog.shared.log("capture", "ReplayKit gave no frame in 10 s → giving up")
+                RPScreenRecorder.shared().stopCapture { _ in }
+                continuation.resume(throwing: CaptureTimeout())
+            }
         }
     }
 
+    private struct CaptureTimeout: LocalizedError {
+        var errorDescription: String? { "screen capture produced no picture (not supported on the iOS Simulator)" }
+    }
+
+    #if canImport(ScreenCaptureKit)
     @available(iOS 27.0, *)
-    private func startDevice() async throws {
+    private func startScreenCaptureKit(appOnly: Bool) async throws {
         let firstFrame = AsyncStream<Void>.makeStream()
         let capture = DeviceCapture(
             maxLongSide: maxLongSide,
+            appOnly: appOnly,
             onFrame: { [weak self] buffer, time in
                 guard let self else { return }
                 self.queue.sync { self.deliver(buffer, at: time) }
@@ -132,6 +147,7 @@ final class AppScreenSource {
         }
         firstFrame.continuation.finish()
     }
+    #endif
 
     /// Called when the system ends a whole-device capture (e.g. the user stopped it from Control Center).
     var onStop: ((Error) -> Void)?
@@ -142,12 +158,14 @@ final class AppScreenSource {
         activeObserver = nil
         resendTimer?.cancel()
         resendTimer = nil
+        #if canImport(ScreenCaptureKit)
         if #available(iOS 27.0, *), let capture = deviceCapture as? DeviceCapture {
             deviceCapture = nil
             Task { await capture.stop() }
-        } else {
-            RPScreenRecorder.shared().stopCapture { _ in }
+            return
         }
+        #endif
+        RPScreenRecorder.shared().stopCapture { _ in }
     }
 
     /// Re-sends the last frame once a second while the screen is still, so a viewer who joins
@@ -268,5 +286,55 @@ final class AppScreenSource {
     deinit {
         resendTimer?.cancel()
         if let transfer { VTPixelTransferSessionInvalidate(transfer) }
+    }
+}
+
+/// Which system API captures the screen. ReplayKit's screen sharing is deprecated in the iOS 27 SDK in
+/// favour of ScreenCaptureKit, but ELD supports iOS 17, so both are kept:
+/// - auto: ScreenCaptureKit on iOS 27+, ReplayKit before.
+/// - replayKit / screenCaptureKit: forced, to compare both on one iOS 27 device.
+/// Whole-device capture before iOS 27 would need a Broadcast Upload Extension (ReplayKit), not in this PoC.
+enum CaptureAPI: String, CaseIterable, Identifiable {
+    case auto
+    case replayKit = "replaykit"
+    case screenCaptureKit = "screencapturekit"
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .auto: "Auto (ScreenCaptureKit on iOS 27+)"
+        case .replayKit: "ReplayKit"
+        case .screenCaptureKit: "ScreenCaptureKit (iOS 27+)"
+        }
+    }
+
+    private static let key = "captureAPI"
+
+    static var current: CaptureAPI {
+        get { UserDefaults.standard.string(forKey: key).flatMap(CaptureAPI.init) ?? .auto }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: key) }
+    }
+
+    func usesScreenCaptureKit(device: Bool) -> Bool {
+        #if !canImport(ScreenCaptureKit)
+        return false
+        #endif
+        guard #available(iOS 27.0, *) else { return false }
+        // In-app ReplayKit cannot capture other apps, so device mode on iOS 27 always uses ScreenCaptureKit.
+        return device || self != .replayKit
+    }
+}
+
+/// True for the first caller only; safe across the threads ReplayKit calls back on.
+private final class OnceFlag {
+    private var used = false
+    private let lock = NSLock()
+
+    func claim() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if used { return false }
+        used = true
+        return true
     }
 }
