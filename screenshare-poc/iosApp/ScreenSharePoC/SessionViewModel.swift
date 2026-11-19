@@ -51,6 +51,7 @@ final class SessionViewModel: ObservableObject {
     private var isJoining = false
     private let discovery = ServerDiscovery()
     private var joinedHost: String?
+    private let liveActivity = LiveActivityController()
     /// iOS ended the capture (lock, call); it is started again, with a new consent, on return.
     private var resumeCaptureOnReturn = false
 
@@ -86,6 +87,18 @@ final class SessionViewModel: ObservableObject {
         }
         watch = controller.watchState { [weak self] state in self?.sessionChanged(state) }
         observeLifecycle()
+        observers.append(NotificationCenter.default.addObserver(
+            forName: .endSupportSessionFromActivity, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            guard self.streaming != nil else {
+                // A card with no session behind it (e.g. after the app was killed): just remove it.
+                self.liveActivity.endAll(reason: "End pressed with no session running")
+                return
+            }
+            self.append("driver ended the session from the Live Activity")
+            self.controller.endByDriver()
+        })
         discovery.onChange = { [weak self] server in self?.discoveredChanged(server) }
         discovery.start()
         DispatchQueue.main.async { [weak self] in self?.join() }
@@ -228,6 +241,7 @@ final class SessionViewModel: ObservableObject {
         DiagLog.shared.log("session", "\(state) → \(newState)")
         let wasStreaming = state is SessionStateStreaming
         state = newState
+        liveActivity.update(for: newState)
         if newState is SessionStateStreaming, !wasStreaming { announceControlMode() }
         if newState is SessionStateEnded {
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.controller.reset() }

@@ -8,13 +8,15 @@
     <application
         android:name=".PocApp"
         android:label="ScreenShare PoC"
+        android:icon="@mipmap/ic_launcher"
         android:theme="@android:style/Theme.Material.Light.NoActionBar"
         android:usesCleartextTraffic="true">
 
         <activity
             android:name=".MainActivity"
-            android:exported="true"
-            android:launchMode="singleTask">
+            android:exported="true">
+            <!-- Default launch mode on purpose: when the driver picks this app in the "share one app" list,
+                 the system relaunches it, and singleTask would cancel the pending capture-consent result. -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

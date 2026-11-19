@@ -16,16 +16,20 @@ targets:
   ScreenSharePoC:
     type: application
     platform: iOS
-    sources: [ScreenSharePoC]
+    sources: [ScreenSharePoC, LiveActivityShared]
     dependencies:
       - package: LiveKit
+      - target: ScreenSharePoCLiveActivity
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.trackensure.screensharepoc
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         TARGETED_DEVICE_FAMILY: "1"
         ENABLE_USER_SCRIPT_SANDBOXING: NO
         FRAMEWORK_SEARCH_PATHS: ["$(inherited)", "$(SRCROOT)/../shared/build/xcode-frameworks/$(CONFIGURATION)/$(SDK_NAME)"]
         OTHER_LDFLAGS: ["$(inherited)", "-framework", "Shared"]
+        # The Live Activity "End" intent acts only in the app's process.
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: ["$(inherited)", "MAIN_APP"]
     preBuildScripts:
       - name: Build KMP framework
         basedOnDependencyAnalysis: false
@@ -42,7 +46,25 @@ targets:
         NSCameraUsageDescription: Camera preview demo for the screen sharing PoC.
         NSLocalNetworkUsageDescription: Finds and connects to the support server on the local network.
         NSBonjourServices: [_screensharepoc._tcp]
+        # Session indicator in the Dynamic Island and on the Lock Screen.
+        NSSupportsLiveActivities: true
         # iOS 27 ScreenCaptureKit stops a system-wide stream in the background without this mode.
         UIBackgroundModes: [screen-capture]
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
+
+  ScreenSharePoCLiveActivity:
+    type: app-extension
+    platform: iOS
+    sources: [ScreenSharePoCLiveActivity, LiveActivityShared]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.trackensure.screensharepoc.liveactivity
+        TARGETED_DEVICE_FAMILY: "1"
+        SKIP_INSTALL: YES
+    info:
+      path: ScreenSharePoCLiveActivity/Info.plist
+      properties:
+        CFBundleDisplayName: ScreenShare PoC
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension

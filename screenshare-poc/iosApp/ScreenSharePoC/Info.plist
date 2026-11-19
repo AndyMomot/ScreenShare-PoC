@@ -33,6 +33,8 @@
 	<string>Camera preview demo for the screen sharing PoC.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Finds and connects to the support server on the local network.</string>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>screen-capture</string>

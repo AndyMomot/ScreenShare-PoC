@@ -160,7 +160,8 @@ object PocSession : ScreenShareEngine {
             is RoomEvent.Reconnected -> { _link.value = Link.ONLINE; log("reconnected") }
             is RoomEvent.Disconnected -> {
                 log("disconnected: ${event.reason}")
-                if (controller.state.value !is SessionState.Idle) controller.endByDriver()
+                val state = controller.state.value
+                if (state is SessionState.Streaming || state is SessionState.Requested) controller.endByDriver()
                 scheduleRetry()
             }
             is RoomEvent.DataReceived -> {
@@ -264,6 +265,12 @@ object PocSession : ScreenShareEngine {
         scope.launch {
             runCatching { room.localParticipant.setScreenShareEnabled(false) }
             log("capture stopped")
+            // Publishing a new screen track on the same connection fails in LiveKit Android ("order of m-lines
+            // in subsequent offer doesn't match"), so the next session never gets video. Rejoin with a clean
+            // connection after every session.
+            log("rejoining for a clean next session")
+            retry = 0
+            room.disconnect()
         }
     }
 
