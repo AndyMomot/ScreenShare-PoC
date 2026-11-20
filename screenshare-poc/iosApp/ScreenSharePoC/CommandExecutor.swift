@@ -2,7 +2,7 @@ import Shared
 import UIKit
 import WebKit
 
-/// Executes support commands inside this app with public APIs only.
+/// Executes support commands inside this app; in App Store mode with public APIs only (see `ControlMode`).
 /// There is no public way to inject touches, so each command is mapped to the action it means:
 /// UIKit controls get their actions sent, SwiftUI content is activated through accessibility.
 final class CommandExecutor {
@@ -10,9 +10,11 @@ final class CommandExecutor {
     private weak var lastWebView: WKWebView?
 
     init() {
+        // The accessibility switch acts on this process only, so a stored Full mode is applied again at launch.
         if ControlMode.current == .full { AccessibilityEnabler.set(true) }
     }
 
+    /// Runs one command on the main thread; returns nil on success or a short reason shown on the support page.
     func execute(_ command: ControlCommand) -> String? {
         guard let window = Self.keyWindow() else { return "no key window" }
         if let tap = command as? CmdTap {
@@ -30,6 +32,7 @@ final class CommandExecutor {
         return "unsupported command"
     }
 
+    /// The app's key window; commands use its coordinate space (normalized coordinates map to its bounds).
     static func keyWindow() -> UIWindow? {
         UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
@@ -39,6 +42,8 @@ final class CommandExecutor {
 
     // MARK: - Tap
 
+    /// Walks up from the hit-tested view and handles the first thing it recognises: text input, web view,
+    /// alert button, UIKit control. Anything else is treated as SwiftUI content (full mode only).
     private func tapAt(_ p: CGPoint, in window: UIWindow) -> String? {
         let hit = window.hitTest(p, with: nil)
         Self.trace("tap at (\(Int(p.x)), \(Int(p.y))) of \(Int(window.bounds.width))×\(Int(window.bounds.height)) · hit chain: \(Self.chain(from: hit))")
@@ -54,6 +59,7 @@ final class CommandExecutor {
             if let webView = current as? WKWebView {
                 return tapInWeb(webView, at: window.convert(p, to: webView))
             }
+            // Alert buttons are private UIKit views, recognisable only by class name.
             if String(describing: type(of: current)).contains("AlertControllerActionView") {
                 guard ControlMode.current == .full else {
                     Self.trace("alert button: blocked in App Store mode")
@@ -64,9 +70,11 @@ final class CommandExecutor {
             if let control = current as? UIControl, control.isEnabled {
                 Self.trace("→ UIControl \(type(of: control))")
                 if let toggle = control as? UISwitch {
+                    // A switch reacts to valueChanged, not touchUpInside; flip it the way a user tap would.
                     toggle.setOn(!toggle.isOn, animated: true)
                     toggle.sendActions(for: .valueChanged)
                 } else {
+                    // Buttons may listen to either event; sending both covers target/action and UIAction handlers.
                     control.sendActions(for: .touchUpInside)
                     control.sendActions(for: .primaryActionTriggered)
                 }
@@ -109,6 +117,7 @@ final class CommandExecutor {
     private func tapInWeb(_ webView: WKWebView, at p: CGPoint) -> String? {
         lastWebView = webView
         let zoom = max(webView.scrollView.zoomScale, 0.01)
+        // elementFromPoint takes CSS pixels relative to the viewport; at zoom 1 they equal points.
         let x = p.x / zoom, y = p.y / zoom
         let script = """
         (function() {
@@ -125,13 +134,17 @@ final class CommandExecutor {
         return nil
     }
 
+    /// Appends text to the page's focused input and fires `input` so page scripts and frameworks notice the change.
     private func typeInWeb(_ webView: WKWebView, _ value: String) {
-        let escaped = value.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
+        // A JSON string literal is valid JavaScript and escapes quotes, backslashes and newlines alike.
+        guard let data = try? JSONSerialization.data(withJSONObject: [value]),
+              let array = String(data: data, encoding: .utf8) else { return }
+        let literal = String(array.dropFirst().dropLast())
         let script = """
         (function() {
           var e = document.activeElement;
           if (!e || !('value' in e)) return 'no focused input in the page';
-          e.value += '\(escaped)';
+          e.value += \(literal);
           e.dispatchEvent(new Event('input', { bubbles: true }));
           return 'typed into ' + e.tagName + (e.id ? '#' + e.id : '');
         })()
@@ -163,6 +176,7 @@ final class CommandExecutor {
         return nil
     }
 
+    /// All label texts under a view; used to read an alert button's title.
     private static func labels(in view: UIView) -> [String] {
         var result: [String] = []
         if let label = view as? UILabel, let text = label.text { result.append(text) }
@@ -170,12 +184,14 @@ final class CommandExecutor {
         return result
     }
 
+    /// Topmost presented controller (sheet, alert, cover), or nil when nothing is presented over the root.
     private static func topPresented(in window: UIWindow) -> UIViewController? {
         guard var top = window.rootViewController else { return nil }
         while let presented = top.presentedViewController, !presented.isBeingDismissed { top = presented }
         return top === window.rootViewController ? nil : top
     }
 
+    /// Last resort for list rows: call the table/collection delegate's selection method directly.
     private static func selectCell(containing view: UIView?) -> Bool {
         var current = view
         while let v = current {
@@ -199,6 +215,7 @@ final class CommandExecutor {
         var found: [(element: NSObject, area: CGFloat)] = []
 
         func visit(_ node: NSObject, depth: Int) {
+            // Depth cap protects against cyclic or pathological accessibility trees.
             guard depth < 80 else { return }
             if let view = node as? UIView, view.isHidden || view.alpha < 0.01 { return }
             if node.isAccessibilityElement {
@@ -207,6 +224,7 @@ final class CommandExecutor {
                     found.append((node, frame.width * frame.height))
                 }
             }
+            // Containers expose children either as an array or through the indexed accessibility API.
             if let elements = node.accessibilityElements as? [NSObject], !elements.isEmpty {
                 elements.forEach { visit($0, depth: depth + 1) }
             } else {
@@ -233,6 +251,8 @@ final class CommandExecutor {
 
     // MARK: - Swipe
 
+    /// No public API injects a drag, so a swipe is translated into what it would do: close a sheet,
+    /// or move the nearest scroll view's content by the swipe distance (clamped to its content).
     private func swipeFrom(_ start: CGPoint, to end: CGPoint, in window: UIWindow) -> String? {
         // A downward swipe on a sheet that has nothing scrolled closes it, like the system gesture.
         if end.y - start.y > 80, let sheet = Self.topPresented(in: window), !(sheet is UIAlertController),
@@ -268,6 +288,7 @@ final class CommandExecutor {
         return nil
     }
 
+    /// Nearest scrollable ancestor of the view under the point.
     private static func scrollView(at p: CGPoint, in window: UIWindow) -> UIScrollView? {
         var view = window.hitTest(p, with: nil)
         while let current = view {
@@ -279,6 +300,8 @@ final class CommandExecutor {
 
     // MARK: - Text
 
+    /// Types into whatever has focus. The first responder is found with the nil-targeted action trick:
+    /// UIKit delivers the action to the current first responder, which records itself.
     private func insert(_ value: String) -> String? {
         FirstResponder.current = nil
         UIApplication.shared.sendAction(#selector(UIResponder.poc_captureFirstResponder), to: nil, from: nil, for: nil)
@@ -301,6 +324,7 @@ final class CommandExecutor {
 
     // MARK: - Back
 
+    /// Back means: dismiss the topmost presented controller, otherwise pop the deepest navigation stack.
     private func goBack(in window: UIWindow) -> String? {
         guard let root = window.rootViewController else { return "no root view controller" }
         var top = root
@@ -319,6 +343,7 @@ final class CommandExecutor {
         return "nothing to go back from"
     }
 
+    /// Searches children last-first (the visible tab/child is usually last) for a navigation stack that can pop.
     private static func deepestNavigation(in controller: UIViewController) -> UINavigationController? {
         for child in controller.children.reversed() {
             if let found = deepestNavigation(in: child) { return found }
@@ -331,10 +356,12 @@ final class CommandExecutor {
 
     // MARK: - Diagnostics
 
+    /// Control diagnostics go to DiagLog, so failed remote taps can be analysed on the Mac.
     private static func trace(_ line: String) {
         DiagLog.shared.log("control", line)
     }
 
+    /// Class names from a view up to five ancestors, for logs.
     private static func chain(from view: UIView?) -> String {
         var names: [String] = []
         var current = view
@@ -345,6 +372,7 @@ final class CommandExecutor {
         return names.isEmpty ? "nil" : names.joined(separator: " < ")
     }
 
+    /// One-line summary of an accessibility element (class, label, value, traits, frame) for logs.
     private static func describe(_ element: NSObject) -> String {
         let frame = element.accessibilityFrame
         var traits: [String] = []
@@ -364,10 +392,12 @@ final class CommandExecutor {
 
     // MARK: - Helpers
 
+    /// Normalized 0..1 coordinates to window points.
     private func point(_ x: Double, _ y: Double, in window: UIWindow) -> CGPoint {
         CGPoint(x: x * window.bounds.width, y: y * window.bounds.height)
     }
 
+    /// Nearest superview of the given type.
     private static func ancestor<T: UIView>(of view: UIView, _ type: T.Type) -> T? {
         var current = view.superview
         while let v = current {
@@ -378,11 +408,13 @@ final class CommandExecutor {
     }
 }
 
+/// Scratch slot filled by `poc_captureFirstResponder` during `insert`.
 private enum FirstResponder {
     static var current: UIResponder?
 }
 
 extension UIResponder {
+    /// Sent with a nil target, so UIKit calls it on the current first responder. Prefixed to avoid name clashes.
     @objc func poc_captureFirstResponder() {
         FirstResponder.current = self
     }
@@ -426,6 +458,7 @@ enum ControlMode: String, CaseIterable, Identifiable {
         }
     }
 
+    /// UserDefaults key; the mode survives relaunches.
     private static let key = "controlMode"
 
     static var current: ControlMode {
@@ -437,6 +470,7 @@ enum ControlMode: String, CaseIterable, Identifiable {
         }
     }
 
+    /// Failure text sent back to support when App Store mode refuses an action.
     static func blockedReason(_ what: String) -> String {
         "\(what) need a private API — not available in the App Store build"
     }

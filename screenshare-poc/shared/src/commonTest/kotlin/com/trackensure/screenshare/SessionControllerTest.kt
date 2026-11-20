@@ -11,8 +11,10 @@ import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
 @OptIn(ExperimentalCoroutinesApi::class)
+/** Session rules of [SessionController], driven through raw JSON exactly as the data channel delivers it. */
 class SessionControllerTest {
 
+    /** Records what the controller sends and executes; decodes outgoing JSON so assertions work on typed messages. */
     private class FakeEngine : ScreenShareEngine {
         val sent = mutableListOf<Message>()
         val executed = mutableListOf<ControlCommand>()
@@ -27,6 +29,7 @@ class SessionControllerTest {
         override fun execute(command: ControlCommand): String? = null.also { executed += command }
     }
 
+    /** Controller on the test's virtual clock, so the request timeout can be advanced instantly. */
     private fun TestScope.controller(engine: FakeEngine) =
         SessionController(engine, requestTimeoutMillis = 1_000, scope = backgroundScope, now = { testScheduler.currentTime })
 

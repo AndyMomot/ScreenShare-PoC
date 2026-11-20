@@ -19,19 +19,23 @@ final class SessionViewModel: ObservableObject {
     @Published var manualHost: String {
         didSet { UserDefaults.standard.set(manualHost, forKey: "manualHost") }
     }
+    /// Server currently announced over Bonjour, if any.
     @Published private(set) var discovered: ServerDiscovery.Server?
+    /// Persisted control mode; a change is announced to the support page right away.
     @Published var controlMode: ControlMode = ControlMode.current {
         didSet {
             ControlMode.current = controlMode
             announceControlMode()
         }
     }
+    /// Persisted choice of capture framework for app mode; used from the next capture on.
     @Published var captureAPI: CaptureAPI = CaptureAPI.current {
         didSet {
             CaptureAPI.current = captureAPI
             DiagLog.shared.log("driver", "capture API → \(captureAPI.rawValue)")
         }
     }
+    /// Encoding profile handed to the engine for the next capture.
     @Published var profile: StreamProfile = .smooth {
         didSet {
             engine.profile = profile
@@ -39,19 +43,26 @@ final class SessionViewModel: ObservableObject {
         }
     }
     @Published private(set) var link: LinkStatus = .searching
+    /// Mirror of the controller's state, updated through `watchState` so SwiftUI can observe it.
     @Published private(set) var state: SessionState = SessionStateIdle.shared
+    /// Newest-first on-screen log, last 200 lines.
     @Published private(set) var log: [String] = []
 
     let engine: LiveKitEngine
     let controller: SessionController
+    /// Keeps the state subscription alive; cancelled in deinit.
     private var watch: Cancellable?
     private var observers: [NSObjectProtocol] = []
     private var retryWork: DispatchWorkItem?
     private var retryDelays = RetryDelays()
+    /// Guards against overlapping joins from discovery, retries and foreground events.
     private var isJoining = false
     private let discovery = ServerDiscovery()
+    /// Host of the last join attempt, to tell a genuinely new Bonjour announcement from a repeat.
     private var joinedHost: String?
     private let liveActivity = LiveActivityController()
+    /// Who asked for the current session; the Live Activity shows it.
+    private var supportName = "Support"
     /// iOS ended the capture (lock, call); it is started again, with a new consent, on return.
     private var resumeCaptureOnReturn = false
 
@@ -61,6 +72,7 @@ final class SessionViewModel: ObservableObject {
         return typed.isEmpty ? discovered?.host : typed
     }
 
+    /// Wires engine callbacks into the controller, starts discovery and makes the first join attempt.
     init() {
         DiagLog.shared.start()
         manualHost = UserDefaults.standard.string(forKey: "manualHost") ?? ""
@@ -75,6 +87,7 @@ final class SessionViewModel: ObservableObject {
         engine.onConnectionState = { [weak self] state in self?.connectionChanged(state) }
         engine.onLog = { [weak self] line in self?.append(line) }
         engine.onCaptureInterrupted = { [weak self] in self?.captureInterrupted() }
+        // A successful start after an interruption ends the pause; the first start of a session needs nothing here.
         engine.onCaptureStarted = { [weak self] in
             guard let self, self.streaming?.paused == true else { return }
             self.append("capture back → resume")
@@ -109,6 +122,7 @@ final class SessionViewModel: ObservableObject {
         observers.forEach(NotificationCenter.default.removeObserver)
     }
 
+    /// Convenience casts of the Kotlin sealed state for SwiftUI.
     var streaming: SessionStateStreaming? { state as? SessionStateStreaming }
     var requested: SessionStateRequested? { state as? SessionStateRequested }
 
@@ -131,6 +145,7 @@ final class SessionViewModel: ObservableObject {
         }
     }
 
+    /// Notification permission is asked at Accept, when the driver understands why a pause notice could matter.
     func accept() {
         tapped("Accept")
         Notifier.requestPermission()
@@ -142,10 +157,12 @@ final class SessionViewModel: ObservableObject {
     func denyControl() { tapped("Deny control"); controller.denyControl() }
     func revokeControl() { tapped("Control off"); controller.revokeControl() }
 
+    /// Logs a driver button press with the state it was pressed in.
     private func tapped(_ button: String) {
         DiagLog.shared.log("driver", "pressed \(button) · state \(state)")
     }
 
+    /// Adds a line to the on-screen log and DiagLog; hops to main because engine callbacks may come from elsewhere.
     func append(_ line: String) {
         guard Thread.isMainThread else {
             DispatchQueue.main.async { self.append(line) }
@@ -159,6 +176,8 @@ final class SessionViewModel: ObservableObject {
 
     // MARK: - Joining the room
 
+    /// Fetches a token and connects to LiveKit on the chosen host. Does nothing while a join is running
+    /// or the room is not disconnected; with no host yet it waits for discovery.
     private func join() {
         guard !isJoining, engine.connectionState == .disconnected else { return }
         guard let host else {
@@ -182,6 +201,7 @@ final class SessionViewModel: ObservableObject {
         }
     }
 
+    /// Maps LiveKit connection states to the link status; an unexpected disconnect schedules a rejoin.
     private func connectionChanged(_ state: ConnectionState) {
         switch state {
         case .connected:
@@ -192,6 +212,7 @@ final class SessionViewModel: ObservableObject {
         case .reconnecting:
             link = .reconnecting
         case .disconnected:
+            // A failed join schedules its own retry; avoid scheduling a second one here.
             if !isJoining { scheduleRetry(reason: nil) }
         case .disconnecting:
             break
@@ -200,6 +221,7 @@ final class SessionViewModel: ObservableObject {
         }
     }
 
+    /// Rejoins after the next backoff delay; any earlier pending retry is replaced.
     private func scheduleRetry(reason: String?) {
         guard host != nil else {
             link = .searching
@@ -224,6 +246,7 @@ final class SessionViewModel: ObservableObject {
         #endif
     }()
 
+    /// The token server answers with the bare JWT as the response body.
     private func fetchToken(host: String) async throws -> String {
         guard let url = URL(string: "http://\(host):8080/token?identity=\(Self.identity)&name=Driver&room=demo") else {
             throw URLError(.badURL)
@@ -241,7 +264,8 @@ final class SessionViewModel: ObservableObject {
         DiagLog.shared.log("session", "\(state) → \(newState)")
         let wasStreaming = state is SessionStateStreaming
         state = newState
-        liveActivity.update(for: newState)
+        if let requested = newState as? SessionStateRequested { supportName = requested.supportName }
+        liveActivity.update(for: newState, supportName: supportName)
         if newState is SessionStateStreaming, !wasStreaming { announceControlMode() }
         if newState is SessionStateEnded {
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.controller.reset() }
@@ -254,6 +278,7 @@ final class SessionViewModel: ObservableObject {
         engine.sendMessage(json: #"{"type":"control_mode","mode":"\#(controlMode.rawValue)"}"#, reliable: true)
     }
 
+    /// iOS stopped the capture: decide whether the driver stopped it deliberately (end) or iOS did (pause and resume later).
     private func captureInterrupted() {
         guard streaming != nil else { return }
         // Locking the phone also stops the stream while the app is still in front, so look again a
@@ -276,6 +301,7 @@ final class SessionViewModel: ObservableObject {
         }
     }
 
+    /// Restarts capture after a pause caused by iOS, once the app is active and no call is in progress.
     private func resumeCapture() {
         guard resumeCaptureOnReturn, streaming != nil else { return }
         // The system picker cannot show over a call; wait for it to end.
@@ -317,7 +343,9 @@ private struct RetryDelays {
     private var attempt = 0
 
     mutating func next() -> Int {
-        defer { attempt += 1 }
+        // The counter stops at 4 (16 s, capped to 10): an unbounded shift would overflow after
+        // ~63 failures and turn the delay into 0, retrying in a tight loop.
+        defer { attempt = min(attempt + 1, 4) }
         return min(1 << attempt, 10)
     }
 

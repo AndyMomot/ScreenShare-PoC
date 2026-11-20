@@ -5,14 +5,18 @@ import Shared
 
 /// iOS side of ScreenShareEngine: LiveKit room for video + data, capture, command execution.
 final class LiveKitEngine: NSObject, ScreenShareEngine, RoomDelegate {
+    /// One room for the app's lifetime; reconnects reuse it.
     let room = Room()
     private let executor = CommandExecutor()
 
+    /// Encoding profile for the next capture; set from the settings picker.
     var profile: StreamProfile = .smooth
+    /// Mode of the running capture, kept so `restartCapture()` can repeat it; nil when not capturing.
     private var currentMode: CaptureMode?
     private var appSource: AppScreenSource?
     private var appPublication: LocalTrackPublication?
 
+    // Callbacks to SessionViewModel; all are invoked on the main thread.
     var onMessage: ((String) -> Void)?
     var onConnectionState: ((ConnectionState) -> Void)?
     var onLog: ((String) -> Void)?
@@ -28,6 +32,7 @@ final class LiveKitEngine: NSObject, ScreenShareEngine, RoomDelegate {
 
     var connectionState: ConnectionState { room.connectionState }
 
+    /// Joins the LiveKit room with a token from the Mac's token server.
     func connect(url: String, token: String) async throws {
         try await room.connect(url: url, token: token)
     }
@@ -38,6 +43,7 @@ final class LiveKitEngine: NSObject, ScreenShareEngine, RoomDelegate {
 
     // MARK: - ScreenShareEngine (called by SessionController on the main thread)
 
+    /// Publishes protocol JSON on the data channel; failures are only logged, the session rules don't wait for delivery.
     func sendMessage(json: String, reliable: Bool) {
         let data = Data(json.utf8)
         log("→ \(json)")
@@ -50,6 +56,7 @@ final class LiveKitEngine: NSObject, ScreenShareEngine, RoomDelegate {
         }
     }
 
+    /// Starts capture asynchronously and reports the outcome through `onCaptureStarted` / `onCaptureFailed`.
     func startCapture(mode: CaptureMode) {
         currentMode = mode
         let device = mode == CaptureMode.device
@@ -66,6 +73,8 @@ final class LiveKitEngine: NSObject, ScreenShareEngine, RoomDelegate {
                 startSenderStats()
                 // The task runs off the main thread; the session rules and SwiftUI state live on main.
                 await MainActor.run { onCaptureStarted?() }
+            } catch is CaptureCancelled {
+                log("capture finished starting after the session ended → discarded")
             } catch {
                 log("capture failed: \(error.localizedDescription)")
                 await MainActor.run { onCaptureFailed?(error.localizedDescription) }
@@ -79,6 +88,7 @@ final class LiveKitEngine: NSObject, ScreenShareEngine, RoomDelegate {
         guard let source = await AppScreenSource.make(maxLongSide: profile.maxLongSide, fps: profile.captureOptions.fps) else {
             throw LiveKitError(.invalidState, message: "buffer capturer unavailable")
         }
+        // Fires when iOS ends the capture (lock, call, Stop in Control Center); the view model pauses the session.
         source.onStop = { [weak self] error in
             DispatchQueue.main.async {
                 self?.log("system stopped the capture: \(error.localizedDescription)")
@@ -86,9 +96,32 @@ final class LiveKitEngine: NSObject, ScreenShareEngine, RoomDelegate {
             }
         }
         try await source.start(device: device)
-        appSource = source
-        appPublication = try await room.localParticipant.publish(videoTrack: source.track, options: profile.publishOptions)
+        // The system picker can stay open for a long time; the session may have ended meanwhile.
+        // Session state lives on the main thread, so check and claim the source there.
+        let stillWanted = await MainActor.run { () -> Bool in
+            guard currentMode != nil else { return false }
+            appSource = source
+            return true
+        }
+        guard stillWanted else {
+            source.stop()
+            throw CaptureCancelled()
+        }
+        let publication = try await room.localParticipant.publish(videoTrack: source.track, options: profile.publishOptions)
+        let current = await MainActor.run { () -> Bool in
+            guard appSource === source else { return false }
+            appPublication = publication
+            return true
+        }
+        if !current {
+            // Stopped while publishing: take the track back down.
+            try? await room.localParticipant.unpublish(publication: publication)
+            throw CaptureCancelled()
+        }
     }
+
+    /// The session ended while the capture was still starting.
+    private struct CaptureCancelled: Error {}
 
     /// Starts the capture again in the same mode after iOS stopped it; asks the driver again.
     func restartCapture() {
@@ -104,6 +137,7 @@ final class LiveKitEngine: NSObject, ScreenShareEngine, RoomDelegate {
         }
     }
 
+    /// Stops capture and unpublishes the video track at session end.
     func stopCapture() {
         currentMode = nil
         statsTask?.cancel()
@@ -118,20 +152,16 @@ final class LiveKitEngine: NSObject, ScreenShareEngine, RoomDelegate {
             }
             return
         }
-        Task {
-            do {
-                try await room.localParticipant.setScreenShare(enabled: false)
-                log("capture stopped")
-            } catch {
-                log("stop failed: \(error.localizedDescription)")
-            }
-        }
+        // Nothing running yet: a capture still starting sees currentMode == nil and discards itself.
+        log("capture stopped (it had not started yet)")
     }
 
+    /// Shows the support pointer in an overlay window that is itself captured, so support sees it too.
     func showPointer(x: Double, y: Double) {
         PointerOverlay.shared.show(x: x, y: y)
     }
 
+    /// Runs a control command through `CommandExecutor` and logs the app state, which explains failures in background.
     func execute(command: ControlCommand) -> String? {
         DiagLog.shared.log("control", "command \(command) · app state \(UIApplication.shared.applicationState.rawValue) (0 active, 1 inactive, 2 background)")
         let failure = executor.execute(command)
@@ -141,11 +171,13 @@ final class LiveKitEngine: NSObject, ScreenShareEngine, RoomDelegate {
 
     // MARK: - RoomDelegate
 
+    /// LiveKit delivers data off the main thread; SessionController must be called on main.
     func room(_ room: Room, participant: RemoteParticipant?, didReceiveData data: Data, forTopic topic: String, encryptionType: EncryptionType) {
         let text = String(decoding: data, as: UTF8.self)
         DispatchQueue.main.async { self.onMessage?(text) }
     }
 
+    /// Forwards connection changes to the view model on the main thread.
     func room(_ room: Room, didUpdateConnectionState connectionState: ConnectionState, from oldConnectionState: ConnectionState) {
         DispatchQueue.main.async { self.onConnectionState?(connectionState) }
     }
@@ -164,6 +196,7 @@ final class LiveKitEngine: NSObject, ScreenShareEngine, RoomDelegate {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
                 guard let self, let track = self.room.localParticipant.localVideoTracks.first?.track else { continue }
+                // Statistics collection is opt-in per track; enable it once for each new track and wait a tick for data.
                 if reporting !== track {
                     await track.set(reportStatistics: true)
                     reporting = track
@@ -171,11 +204,13 @@ final class LiveKitEngine: NSObject, ScreenShareEngine, RoomDelegate {
                     continue
                 }
                 guard let stats = track.statistics,
+                      // With simulcast there are several outbound layers; report the one actually carrying the most bytes.
                       let out = stats.outboundRtpStream.max(by: { ($0.bytesSent ?? 0) < ($1.bytesSent ?? 0) }) else { continue }
                 defer { previous = out }
                 guard let prev = previous else { continue }
 
                 let seconds = max((out.timestamp - prev.timestamp) / 1_000_000, 0.001) // timestamps are in microseconds
+                // Counters can reset when the encoder restarts; `min` keeps the delta from going negative.
                 let frames = Double((out.framesEncoded ?? 0) - min(out.framesEncoded ?? 0, prev.framesEncoded ?? 0))
                 let packets = Double((out.packetsSent ?? 0) - min(out.packetsSent ?? 0, prev.packetsSent ?? 0))
                 let remote = stats.remoteInboundRtpStream.first
@@ -205,6 +240,7 @@ final class LiveKitEngine: NSObject, ScreenShareEngine, RoomDelegate {
         }
     }
 
+    /// Sends a line to the view model's on-screen log (which also forwards it to DiagLog).
     private func log(_ line: String) {
         DispatchQueue.main.async { self.onLog?(line) }
     }

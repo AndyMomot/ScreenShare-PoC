@@ -14,17 +14,21 @@ final class DiagLog {
         set { queue.async { self._host = newValue } }
     }
 
+    // All mutable state below is touched only on `queue`; that serial queue is the lock.
     private var _host: String?
     private var pending: [String] = []
     private let queue = DispatchQueue(label: "diag-log")
     private var flushTimer: DispatchSourceTimer?
     private var sampleTimer: DispatchSourceTimer?
+    /// Last CPU sample, to turn cumulative CPU seconds into a percentage over the sampling interval.
     private var previousCPU: (time: Double, cpu: Double)?
+    /// Survives the crash in Documents; read and deleted on the next `start()`.
     private static let crashFile = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         .appendingPathComponent("last-crash.txt")
 
     private init() {}
 
+    /// Called once at launch: crash handlers, report of the previous crash, system observers, flush and sample timers.
     func start() {
         installCrashHandlers()
         if let crash = try? String(contentsOf: Self.crashFile, encoding: .utf8) {
@@ -49,6 +53,7 @@ final class DiagLog {
         sampleTimer = sample
     }
 
+    /// Prints the line and queues it for the Mac; keeps at most the last 2000 unsent lines.
     func log(_ tag: String, _ message: String) {
         let line = "\(Self.time()) [\(tag)] \(message)"
         print(line)
@@ -60,6 +65,7 @@ final class DiagLog {
 
     // MARK: - Sending
 
+    /// Runs on `queue` every second: posts all pending lines in one request, re-queues them in front on failure.
     private func flush() {
         guard !pending.isEmpty, let host = _host,
               let url = URL(string: "http://\(host):8080/log") else { return }
@@ -78,6 +84,7 @@ final class DiagLog {
 
     // MARK: - Device sampling
 
+    /// Every 10 s: CPU %, memory footprint, thermal state, battery and Low Power Mode, to see what streaming costs.
     private func sampleDevice() {
         let now = CACurrentMediaTime()
         let cpu = Self.cpuSeconds()
@@ -92,6 +99,7 @@ final class DiagLog {
         log("device", "cpu \(cpuText) (100% = one core) · memory \(memory) · thermal \(Self.thermal(ProcessInfo.processInfo.thermalState)) · battery \(battery) \(Self.batteryState(device.batteryState)) · lowPower \(ProcessInfo.processInfo.isLowPowerModeEnabled)")
     }
 
+    /// Total user + system CPU time consumed by this process so far.
     private static func cpuSeconds() -> Double {
         var usage = rusage()
         getrusage(RUSAGE_SELF, &usage)
@@ -100,6 +108,7 @@ final class DiagLog {
         return user + system
     }
 
+    /// `phys_footprint` is the figure iOS uses for memory limits (what Xcode's memory gauge shows).
     private static func memoryFootprintMB() -> Double? {
         var info = task_vm_info_data_t()
         var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
@@ -132,6 +141,7 @@ final class DiagLog {
 
     // MARK: - System events
 
+    /// Logs app lifecycle and system events that explain pauses in capture (lock, calls, memory, screen recording state).
     private func observeSystem() {
         let center = NotificationCenter.default
         let events: [(Notification.Name, String)] = [
@@ -179,6 +189,7 @@ final class DiagLog {
         }
     }
 
+    /// Shared formatter; DateFormatter is not thread-safe, so `time()` serializes access.
     private static let formatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm:ss.SSS"

@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Configuration of ControlService. canPerformGestures allows dispatchGesture (taps, swipes);
+     canRetrieveWindowContent allows finding the focused text field to type into. -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:canPerformGestures="true"

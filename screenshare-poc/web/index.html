@@ -1,9 +1,13 @@
 <!doctype html>
+<!-- Support console: joins the LiveKit room "demo", shows the driver's screen, sends session and control
+     messages (same JSON protocol as shared/Messages.kt) and displays receiver and sender statistics.
+     Served by web/server.mjs, which also issues the token. -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Support Console</title>
+<!-- Pinned LiveKit JS client; exposes the global LivekitClient used below. -->
 <script src="https://cdn.jsdelivr.net/npm/livekit-client@2.23.0/dist/livekit-client.umd.js"></script>
 <style>
   :root { --bg:#f4f5f7; --panel:#fff; --text:#1d1f23; --muted:#6b7280; --accent:#2563eb; --danger:#dc2626; --ok:#16a34a; --border:#e5e7eb; }
@@ -45,7 +49,9 @@
   <section class="stage">
     <div class="clock" id="clock">--:--:--.---</div>
     <div class="screen">
+      <!-- Muted + playsinline so the browser allows autoplay. Mouse events on it become taps, swipes or pointer moves. -->
       <video id="video" autoplay playsinline muted></video>
+      <!-- Status overlay over the video (connecting, driver offline, waiting); pointer-events:none keeps clicks on the video. -->
       <div class="overlay" id="overlay"><div class="spinner"></div><div id="overlayTitle">Connecting…</div><small id="overlayHint"></small></div>
     </div>
   </section>
@@ -95,6 +101,7 @@ const video = $('video');
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
+// Page state: current room and video track, next command id, previous/first stats samples, pointer mode, mouse-down origin.
 let room = null;
 let videoTrack = null;
 let nextId = 1;
@@ -104,14 +111,20 @@ let pointerMode = false;
 let lastPointerAt = 0;
 let down = null;
 
+/** Prepends a line to the on-page log (capped at ~8000 chars) and queues it for the server log. */
 function log(line) {
   const time = new Date().toLocaleTimeString();
   $('log').textContent = `${time} ${line}\n` + $('log').textContent.slice(0, 8000);
   diag(line);
 }
 
+// A unique identity per tab: LiveKit disconnects an older participant with the same identity.
+// Declared before diag(): an early error event would otherwise read it before initialisation.
+const identity = `support-${Math.random().toString(36).slice(2, 7)}`;
 // Diagnostics: every line also goes to the server's logs/poc.log, next to the app's lines.
 let diagPending = [];
+/** Escapes text from the phone before it goes into innerHTML. */
+const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 function diag(line) { diagPending.push(`[${identity}] ${line}`); }
 setInterval(() => {
   if (!diagPending.length) return;
@@ -127,12 +140,11 @@ let pointerCount = 0;
 // Driver apps join as "driver-…" (one identity per install). A request goes to every driver online,
 // so keep one driver app running for a demo.
 const isDriver = (identity) => identity.startsWith('driver');
-// A unique identity per tab: LiveKit disconnects an older participant with the same identity.
-const identity = `support-${Math.random().toString(36).slice(2, 7)}`;
 let sessionPhase = 'idle';   // idle | requested | accepted | streaming | ended
 let retryTimer = null;
 let retryDelay = 1000;
 
+/** True when at least one driver app is in the room. */
 function driverOnline() {
   return !!room && [...room.remoteParticipants.values()].some((p) => isDriver(p.identity));
 }
@@ -161,20 +173,28 @@ function render() {
   $('overlayHint').textContent = hint;
 }
 
+/** Reconnects with backoff 1, 2, 4, 8, then every 10 s; reset after a successful connect. */
 function scheduleReconnect() {
   clearTimeout(retryTimer);
   retryTimer = setTimeout(() => connect().catch((e) => { log(`connect failed: ${e.message}`); scheduleReconnect(); }), retryDelay);
   retryDelay = Math.min(retryDelay * 2, 10000);
 }
 
+/**
+ * Fetches a token from the same server that served the page and joins the room. LiveKit is assumed to run
+ * on the same host (port 7880). adaptiveStream is off so the full published resolution is always received.
+ */
 async function connect() {
   const token = await (await fetch(`/token?identity=${identity}&name=Support&room=demo`)).text();
+  // A reconnect builds a new Room; detach the old one so its listeners stop firing.
+  if (room) room.removeAllListeners();
   room = new Room({ adaptiveStream: false });
   room.on(RoomEvent.Disconnected, () => {
     log('disconnected from server, retrying');
     videoTrack = null; video.srcObject = null; sessionPhase = 'idle';
     render(); scheduleReconnect();
   });
+  // Video arriving is the reliable signal that sharing actually started.
   room.on(RoomEvent.TrackSubscribed, (track) => {
     if (track.kind !== 'video') return;
     videoTrack = track;
@@ -214,6 +234,10 @@ function lowLatency(track) {
   }
 }
 
+/**
+ * Publishes one protocol message. Commands carry an id; their send time is kept to show the ack round trip.
+ * Pointer moves are sent lossy and only sampled into the log.
+ */
 function send(message, reliable = true) {
   if (!room) return log('not connected');
   room.localParticipant.publishData(encoder.encode(JSON.stringify(message)), { reliable });
@@ -222,6 +246,7 @@ function send(message, reliable = true) {
   else if (++pointerCount % 20 === 1) diag(`pointer moves sent: ${pointerCount}`);
 }
 
+/** Renders the phone's own encoder report (the non-protocol "sender_stats" message). */
 function showSenderStats(m) {
   const f = (v, digits = 0, unit = '') => v == null ? '—' : `${Number(v).toFixed(digits)}${unit}`;
   const rows = [
@@ -234,12 +259,18 @@ function showSenderStats(m) {
     ['RTT phone ↔ server', f(m.rttMs, 0, ' ms')],
     ['Encoder impl', m.encoder],
   ];
-  $('senderStats').innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
+  $('senderStats').innerHTML = rows.map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(v)}</td></tr>`).join('');
 }
 
 let senderStatsCount = 0;
+/** Handles a message from the driver: logs it, updates the session text and re-renders. */
 function handle(text) {
-  const message = JSON.parse(text);
+  let message;
+  try {
+    message = JSON.parse(text);
+  } catch {
+    return diag(`ignored a message that is not JSON: ${String(text).slice(0, 80)}`);
+  }
   if (message.type === 'sender_stats') {
     if (++senderStatsCount % 5 === 0) diag(`sender ${text}`);
     return showSenderStats(message);
@@ -279,6 +310,7 @@ function normalized(event) {
   return { x, y };
 }
 
+// Mouse gestures: a release within 8 px of the press is a tap, a longer drag is a swipe; in pointer mode only the position is sent.
 video.addEventListener('mousedown', (e) => { down = { e, p: normalized(e) }; });
 video.addEventListener('mouseup', (e) => {
   const start = down; down = null;
@@ -290,6 +322,7 @@ video.addEventListener('mouseup', (e) => {
   if (moved < 8) send({ type: 'tap', id: nextId++, x: end.x, y: end.y });
   else send({ type: 'swipe', id: nextId++, x1: start.p.x, y1: start.p.y, x2: end.x, y2: end.y, ms: 300 });
 });
+// Pointer mode: send the hover position, throttled to one message per 50 ms.
 video.addEventListener('mousemove', (e) => {
   if (!pointerMode || performance.now() - lastPointerAt < 50) return;
   const p = normalized(e);
@@ -298,6 +331,7 @@ video.addEventListener('mousemove', (e) => {
   send({ type: 'pointer', x: p.x, y: p.y }, false);
 });
 
+// Diagnostics: log which button was pressed and page visibility changes.
 document.addEventListener('click', (e) => {
   const b = e.target.closest('button');
   if (b) diag(`button "${b.textContent.trim()}"`);
@@ -305,6 +339,7 @@ document.addEventListener('click', (e) => {
 video.addEventListener('resize', () => log(`video size ${video.videoWidth}×${video.videoHeight}`));
 document.addEventListener('visibilitychange', () => diag(`page ${document.visibilityState}`));
 
+/** Asks the driver for a session in "app" or "device" mode. */
 function request(mode) {
   send({ type: 'request', supportName: 'Support', mode });
   sessionPhase = 'requested';
@@ -316,6 +351,7 @@ $('reqDevice').onclick = () => request('device');
 $('end').onclick = () => { send({ type: 'end', by: 'support' }); sessionPhase = 'idle'; $('session').textContent = 'ended by support'; render(); };
 $('reqControl').onclick = () => send({ type: 'control_request' });
 $('back').onclick = () => send({ type: 'back', id: nextId++ });
+// Fixed swipes in the middle of the screen: an upward finger move scrolls content down, and vice versa.
 $('swipeUp').onclick = () => send({ type: 'swipe', id: nextId++, x1: 0.5, y1: 0.75, x2: 0.5, y2: 0.35, ms: 300 });
 $('swipeDown').onclick = () => send({ type: 'swipe', id: nextId++, x1: 0.5, y1: 0.35, x2: 0.5, y2: 0.75, ms: 300 });
 $('sendText').onclick = () => { send({ type: 'text', id: nextId++, value: $('text').value }); $('text').value = ''; };
@@ -324,6 +360,7 @@ document.querySelectorAll('input[name=mode]').forEach((r) => r.onchange = () => 
 render();
 connect().catch((e) => { log(`connect failed: ${e.message}`); scheduleReconnect(); });
 
+/** Browser clock, updated every frame; compared with the phone's Clock tab in the stream it shows end-to-end latency. */
 function tick() {
   const d = new Date();
   $('clock').textContent = d.toTimeString().slice(0, 8) + '.' + String(d.getMilliseconds()).padStart(3, '0');
@@ -349,6 +386,7 @@ async function readStats() {
   return out;
 }
 
+// Once a second: rates are computed from the difference to the previous sample; averages and totals from the first.
 let receiverStatsCount = 0;
 setInterval(async () => {
   if (!videoTrack?.receiver) return;
@@ -375,7 +413,7 @@ setInterval(async () => {
   rows.push(['Packets lost', `${s.lost ?? 0}`]);
   rows.push(['Codec', `${s.codec ?? '?'} (${s.decoder ?? '?'})`]);
   if (++receiverStatsCount % 5 === 0) diag('receiver ' + rows.map(([k, v]) => `${k}: ${v}`).join(' | '));
-  $('stats').innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
+  $('stats').innerHTML = rows.map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(v)}</td></tr>`).join('');
   prevStats = s;
 }, 1000);
 </script>

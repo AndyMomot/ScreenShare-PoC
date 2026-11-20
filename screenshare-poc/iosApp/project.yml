@@ -1,3 +1,5 @@
+# XcodeGen spec: `xcodegen generate` in iosApp/ produces ScreenSharePoC.xcodeproj and both Info.plist files.
+# Edit this file, not the generated project.
 name: ScreenSharePoC
 options:
   bundleIdPrefix: com.trackensure
@@ -6,6 +8,7 @@ options:
 packages:
   LiveKit:
     url: https://github.com/livekit/client-sdk-swift
+    # Pinned exactly: AppScreenSource feeds frames through LiveKit's BufferCapturer API.
     exactVersion: 2.19.0
 settings:
   base:
@@ -13,6 +16,7 @@ settings:
     CODE_SIGN_STYLE: Automatic
     SWIFT_VERSION: "5.0"
 targets:
+  # The driver app: SwiftUI sources plus the Live Activity types shared with the widget extension.
   ScreenSharePoC:
     type: application
     platform: iOS
@@ -24,12 +28,16 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.trackensure.screensharepoc
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # iPhone only.
         TARGETED_DEVICE_FAMILY: "1"
+        # The Gradle pre-build script reads and writes outside the Xcode sandbox.
         ENABLE_USER_SCRIPT_SANDBOXING: NO
+        # Links the Kotlin Multiplatform `Shared` framework that the pre-build script below produces.
         FRAMEWORK_SEARCH_PATHS: ["$(inherited)", "$(SRCROOT)/../shared/build/xcode-frameworks/$(CONFIGURATION)/$(SDK_NAME)"]
         OTHER_LDFLAGS: ["$(inherited)", "-framework", "Shared"]
         # The Live Activity "End" intent acts only in the app's process.
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: ["$(inherited)", "MAIN_APP"]
+    # Rebuilds the shared Kotlin framework before every Swift compile so Swift always sees current Kotlin code.
     preBuildScripts:
       - name: Build KMP framework
         basedOnDependencyAnalysis: false
@@ -43,16 +51,20 @@ targets:
         CFBundleDisplayName: ScreenShare PoC
         UILaunchScreen: {}
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        # Demo screens include a camera preview, used to test how live video looks in the stream.
         NSCameraUsageDescription: Camera preview demo for the screen sharing PoC.
+        # Local network + Bonjour: the app finds the Mac's token/LiveKit server via ServerDiscovery.
         NSLocalNetworkUsageDescription: Finds and connects to the support server on the local network.
         NSBonjourServices: [_screensharepoc._tcp]
         # Session indicator in the Dynamic Island and on the Lock Screen.
         NSSupportsLiveActivities: true
         # iOS 27 ScreenCaptureKit stops a system-wide stream in the background without this mode.
         UIBackgroundModes: [screen-capture]
+        # The PoC server on the Mac is plain http/ws, which ATS blocks by default.
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
 
+  # Widget extension that renders the Live Activity (Dynamic Island / Lock Screen).
   ScreenSharePoCLiveActivity:
     type: app-extension
     platform: iOS

@@ -1,8 +1,10 @@
+// Widget extension UI for the support-session Live Activity. It only renders; the End button's intent runs in the app.
 import ActivityKit
 import AppIntents
 import SwiftUI
 import WidgetKit
 
+/// Extension entry point; the bundle contains only the Live Activity.
 @main
 struct SupportSessionWidgets: WidgetBundle {
     var body: some Widget {
@@ -53,6 +55,7 @@ struct SupportSessionLiveActivity: Widget {
     }
 }
 
+/// Lock Screen / banner presentation of the activity.
 private struct LockScreenView: View {
     let context: ActivityViewContext<SupportSessionAttributes>
 
@@ -83,6 +86,7 @@ private struct LockScreenView: View {
     }
 }
 
+/// Self-updating session timer; the system renders `timerInterval` text without app updates.
 private struct ElapsedTime: View {
     let since: Date
 
@@ -93,6 +97,7 @@ private struct ElapsedTime: View {
     }
 }
 
+/// Icon, color and text per phase, shared by all presentations.
 private extension SupportSessionAttributes.Phase {
     var icon: String {
         switch self {

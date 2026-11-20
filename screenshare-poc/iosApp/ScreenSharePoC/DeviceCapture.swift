@@ -10,13 +10,16 @@ import UIKit
 /// inside libyuv (SplitUVRow_NEON).
 @available(iOS 27.0, *)
 final class DeviceCapture: NSObject, SCContentSharingPickerObserver, SCStreamOutput, SCStreamDelegate {
+    /// Output frame size requested from ScreenCaptureKit, in pixels.
     private let width: Int
     private let height: Int
     private let onFrame: (CVPixelBuffer, CMTime) -> Void
     private let onStop: (Error) -> Void
     private let appOnly: Bool
+    /// Queue on which ScreenCaptureKit delivers frames; `onFrame` runs on it.
     private let queue = DispatchQueue(label: "device-capture")
     private var stream: SCStream?
+    /// Pending picker answer; touched only on the main thread.
     private var pick: CheckedContinuation<SCContentFilter, Error>?
 
     /// - Parameter maxLongSide: the long side of delivered frames; the system scales to it.
@@ -32,6 +35,7 @@ final class DeviceCapture: NSObject, SCContentSharingPickerObserver, SCStreamOut
         self.onStop = onStop
     }
 
+    /// Shows the system picker, then starts an SCStream for what the driver chose. Throws if the picker is cancelled or fails.
     func start() async throws {
         DiagLog.shared.log("capture", "picker: presenting (asked size \(width)×\(height))")
         let filter = try await presentPicker()
@@ -47,6 +51,7 @@ final class DeviceCapture: NSObject, SCContentSharingPickerObserver, SCStreamOut
         DiagLog.shared.log("capture", "SCStream started")
     }
 
+    /// Stops the stream; safe to call when nothing is running.
     func stop() async {
         guard let stream else { return }
         self.stream = nil
@@ -57,6 +62,7 @@ final class DeviceCapture: NSObject, SCContentSharingPickerObserver, SCStreamOut
     // MARK: - Picker
 
     @MainActor
+    /// Bridges the delegate-based picker to async/await: the observer callbacks resume the stored continuation.
     private func presentPicker() async throws -> SCContentFilter {
         let picker = SCContentSharingPicker.shared
         guard picker.isAvailable else { throw CaptureError.unavailable }
@@ -69,12 +75,14 @@ final class DeviceCapture: NSObject, SCContentSharingPickerObserver, SCStreamOut
     }
 
     @MainActor
+    /// Deactivates the picker and unregisters this observer so the next session starts clean.
     private func releasePicker() {
         let picker = SCContentSharingPicker.shared
         picker.isActive = false
         picker.remove(self)
     }
 
+    /// Resumes the picker continuation once, on the main thread; later callbacks find it nil and are ignored.
     private func finishPick(_ result: Result<SCContentFilter, Error>) {
         DispatchQueue.main.async {
             let continuation = self.pick
@@ -101,6 +109,7 @@ final class DeviceCapture: NSObject, SCContentSharingPickerObserver, SCStreamOut
 
     // MARK: - Stream
 
+    /// Forwards only complete frames; idle/blank status buffers carry no new image.
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .screen, sampleBuffer.isValid,
               let attachments = (CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false)
@@ -111,12 +120,14 @@ final class DeviceCapture: NSObject, SCContentSharingPickerObserver, SCStreamOut
         onFrame(pixelBuffer, CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
     }
 
+    /// The system ended the stream (lock, call, user stopped it); the owner decides whether to pause or end.
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         DiagLog.shared.log("capture", "SCStream stopped by the system: \(error)")
         self.stream = nil
         onStop(error)
     }
 
+    /// Errors the capture adds on top of ScreenCaptureKit's own.
     enum CaptureError: LocalizedError {
         case unavailable, cancelled
         var errorDescription: String? {

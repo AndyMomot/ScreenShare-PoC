@@ -11,25 +11,33 @@ import VideoToolbox
 /// which on a weak uplink makes large frames queue for seconds before they are sent.
 /// Owning the frame here also gives the place where sensitive fields can be masked before encoding.
 final class AppScreenSource {
+    /// The video track to publish; frames are pushed into it through `capturer`.
     let track: LocalVideoTrack
     private let capturer: BufferCapturer
     private let maxLongSide: Int
     private let minFrameInterval: Double
 
+    /// Hardware scaler plus a buffer pool sized for the current output, recreated when the size changes.
     private var transfer: VTPixelTransferSession?
     private var pool: CVPixelBufferPool?
     private var poolSize = (width: 0, height: 0)
+    /// Host time of the last frame handed to LiveKit, and that frame, for pacing and the idle resend.
     private var lastFrameTime: Double = 0
     private var lastOutput: CVPixelBuffer?
     private var resendTimer: DispatchSourceTimer?
+    /// The ScreenCaptureKit capture when used; typed AnyObject because DeviceCapture exists only on iOS 27+.
     private var deviceCapture: AnyObject?
+    /// Frame counters for the periodic log line; `sentTotal` is never reset.
     private var counters = (received: 0, sent: 0, resent: 0, lastReport: 0.0, sentTotal: 0)
     private var mode = "app"
     private var loggedFirstFrame = false
+    /// Newest frame waiting for its pacing slot, and whether a delayed send is already scheduled.
     private var pending: (buffer: CVPixelBuffer, time: CMTime)?
     private var pendingScheduled = false
     private var activeObserver: NSObjectProtocol?
+    /// Serial queue that owns all frame state above; capture callbacks hop onto it.
     private let queue = DispatchQueue(label: "app-screen-source")
+    /// Screen size in points, the coordinate space of `SupportMask` rects.
     private let screenSize = UIScreen.main.bounds.size
 
     private init(track: LocalVideoTrack, capturer: BufferCapturer, maxLongSide: Int, fps: Int) {
@@ -40,6 +48,8 @@ final class AppScreenSource {
         VTPixelTransferSessionCreate(allocator: nil, pixelTransferSessionOut: &transfer)
     }
 
+    /// Creates a buffer-fed screen-share track. The dimensions given here are only an initial hint;
+    /// the real size comes from the first frame.
     static func make(maxLongSide: Int, fps: Int) async -> AppScreenSource? {
         let track = await LocalVideoTrack.createBufferTrack(
             source: .screenShareVideo,
@@ -118,12 +128,14 @@ final class AppScreenSource {
         }
     }
 
+    /// Thrown when ReplayKit starts but never delivers a frame.
     private struct CaptureTimeout: LocalizedError {
         var errorDescription: String? { "screen capture produced no picture (not supported on the iOS Simulator)" }
     }
 
     #if canImport(ScreenCaptureKit)
     @available(iOS 27.0, *)
+    /// Starts DeviceCapture (system picker + SCStream) and waits up to 3 s for the first frame.
     private func startScreenCaptureKit(appOnly: Bool) async throws {
         let firstFrame = AsyncStream<Void>.makeStream()
         let capture = DeviceCapture(
@@ -152,6 +164,7 @@ final class AppScreenSource {
     /// Called when the system ends a whole-device capture (e.g. the user stopped it from Control Center).
     var onStop: ((Error) -> Void)?
 
+    /// Stops whichever capture is running and the resend timer; the track itself is unpublished by the engine.
     func stop() {
         DiagLog.shared.log("capture", "\(mode) stop · sent \(counters.sentTotal) frames in total")
         if let activeObserver { NotificationCenter.default.removeObserver(activeObserver) }
@@ -184,6 +197,7 @@ final class AppScreenSource {
         resendTimer = timer
     }
 
+    /// Entry point for every captured frame (on `queue`): logs, then paces it to the profile's frame rate.
     private func deliver(_ source: CVPixelBuffer, at time: CMTime) {
         counters.received += 1
         if !loggedFirstFrame {
@@ -215,6 +229,7 @@ final class AppScreenSource {
         send(source, at: time)
     }
 
+    /// Downscales, masks and hands one frame to LiveKit.
     private func send(_ source: CVPixelBuffer, at time: CMTime) {
         lastFrameTime = CACurrentMediaTime()
         // Masks are painted into our own copy, never into the system's capture buffer.
@@ -246,11 +261,14 @@ final class AppScreenSource {
         counters = (0, 0, 0, now, counters.sentTotal)
     }
 
+    /// Pixel format code as four characters, e.g. "420f", for the log.
     private static func fourCC(_ code: OSType) -> String {
         let bytes = [24, 16, 8, 0].map { UInt8((code >> UInt32($0)) & 0xFF) }
         return String(decoding: bytes, as: UTF8.self)
     }
 
+    /// Returns a scaled copy no longer than `maxLongSide`, or nil when no scaling is needed and no copy
+    /// was asked for (or scaling failed). `copy` forces a new buffer even at scale 1, so masks can be painted.
     private func downscaled(_ source: CVPixelBuffer, copy: Bool = false) -> CVPixelBuffer? {
         let width = CVPixelBufferGetWidth(source)
         let height = CVPixelBufferGetHeight(source)
@@ -309,6 +327,7 @@ enum CaptureAPI: String, CaseIterable, Identifiable {
         }
     }
 
+    /// UserDefaults key; the choice survives relaunches.
     private static let key = "captureAPI"
 
     static var current: CaptureAPI {
@@ -316,6 +335,7 @@ enum CaptureAPI: String, CaseIterable, Identifiable {
         set { UserDefaults.standard.set(newValue.rawValue, forKey: key) }
     }
 
+    /// Resolves the setting for one capture: ScreenCaptureKit needs both the framework and iOS 27.
     func usesScreenCaptureKit(device: Bool) -> Bool {
         #if !canImport(ScreenCaptureKit)
         return false

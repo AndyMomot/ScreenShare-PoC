@@ -9,6 +9,8 @@ import android.net.nsd.NsdServiceInfo
 import android.os.Build
 import com.trackensure.screenshare.CaptureMode
 import com.trackensure.screenshare.ControlCommand
+import com.trackensure.screenshare.MessageCodec
+import com.trackensure.screenshare.MsgAck
 import com.trackensure.screenshare.ScreenShareEngine
 import com.trackensure.screenshare.SessionController
 import com.trackensure.screenshare.SessionState
@@ -36,8 +38,10 @@ import java.net.URL
  * Lives outside the Activity so the session keeps running while another app is in front.
  */
 object PocSession : ScreenShareEngine {
+    /** Connection to the Mac's LiveKit server, shown in the UI as a status line. */
     enum class Link { SEARCHING, CONNECTING, ONLINE, RECONNECTING, OFFLINE }
 
+    /** Main-thread scope: SessionController expects all calls on one thread. */
     private val scope = MainScope()
     private lateinit var app: Context
     private lateinit var room: Room
@@ -45,23 +49,29 @@ object PocSession : ScreenShareEngine {
         private set
 
     private val _link = MutableStateFlow(Link.SEARCHING)
+    /** Current server link state for the UI. */
     val link: StateFlow<Link> = _link
     private val _log = MutableStateFlow<List<String>>(emptyList())
+    /** Newest-first event log shown on screen (last 200 lines). */
     val log: StateFlow<List<String>> = _log
+    /** Session state from the shared controller, re-exposed for the UI. */
     val state: StateFlow<SessionState> get() = controller.state
 
     /** Set by the visible Activity: asks the system for screen capture consent. */
     var requestProjection: ((CaptureMode) -> Unit)? = null
 
+    /** Mac address from discovery; [retry] indexes the backoff table, [started] makes [start] idempotent. */
     private var host: String? = null
     private var joining: Job? = null
     private var retry = 0
     private var started = false
 
+    /** Heuristic emulator check: the emulator cannot use Bonjour and gets its own identity in the room. */
     val isEmulator: Boolean
         get() = Build.FINGERPRINT.contains("generic") || Build.HARDWARE.contains("ranchu") ||
             Build.PRODUCT.contains("sdk") || Build.MODEL.contains("Emulator")
 
+    /** One-time setup from [PocApp]: creates the room and controller, wires events, starts looking for the Mac. */
     fun start(context: Context) {
         if (started) return
         started = true
@@ -75,6 +85,7 @@ object PocSession : ScreenShareEngine {
             controller.state.collect { state ->
                 log("session → $state")
                 if (state is SessionState.Ended) {
+                    // Keep the end reason on screen briefly, then return to Idle so the next request is accepted.
                     delay(3000)
                     controller.reset()
                 }
@@ -97,6 +108,7 @@ object PocSession : ScreenShareEngine {
                 @Suppress("DEPRECATION")
                 nsd.resolveService(service, object : NsdManager.ResolveListener {
                     override fun onServiceResolved(info: NsdServiceInfo) {
+                        // The server puts its LAN IP in the TXT record; the resolved host address is only a fallback.
                         val txt = info.attributes["host"]?.let { String(it) }
                         @Suppress("DEPRECATION")
                         val address = txt ?: info.host?.hostAddress ?: return
@@ -113,6 +125,7 @@ object PocSession : ScreenShareEngine {
         })
     }
 
+    /** Remembers the Mac's address (also for log upload) and joins unless already online there. */
     private fun serverFound(address: String, name: String) {
         log("found $name at $address")
         if (host == address && _link.value == Link.ONLINE) return
@@ -121,6 +134,10 @@ object PocSession : ScreenShareEngine {
         join()
     }
 
+    /**
+     * Fetches a room token from the Mac's token server, then connects to LiveKit on port 7880.
+     * Skips if a join is in flight or the room is not fully disconnected; failures go to [scheduleRetry].
+     */
     private fun join() {
         val target = host ?: return
         if (joining?.isActive == true || room.state != Room.State.DISCONNECTED) return
@@ -143,6 +160,7 @@ object PocSession : ScreenShareEngine {
         }
     }
 
+    /** Backoff 1, 2, 4, 8, then every 10 seconds; reset to 1 after a successful connect. */
     private fun scheduleRetry() {
         _link.value = Link.OFFLINE
         val seconds = listOf(1, 2, 4, 8, 10)[retry.coerceAtMost(4)]
@@ -153,6 +171,7 @@ object PocSession : ScreenShareEngine {
         }
     }
 
+    /** Maps room events to the link state and feeds data messages into the session controller. */
     private fun onRoomEvent(event: RoomEvent) {
         when (event) {
             is RoomEvent.Connected -> { _link.value = Link.ONLINE; log("online") }
@@ -161,11 +180,13 @@ object PocSession : ScreenShareEngine {
             is RoomEvent.Disconnected -> {
                 log("disconnected: ${event.reason}")
                 val state = controller.state.value
+                // A session cannot survive a lost connection: end it so the UI and capture are cleaned up.
                 if (state is SessionState.Streaming || state is SessionState.Requested) controller.endByDriver()
                 scheduleRetry()
             }
             is RoomEvent.DataReceived -> {
                 val text = String(event.data)
+                // Pointer moves arrive many times a second; logging them would flood the log.
                 if (!text.contains("\"pointer\"")) log("← $text")
                 controller.onRemoteMessage(text)
             }
@@ -175,6 +196,7 @@ object PocSession : ScreenShareEngine {
 
     // MARK: ScreenShareEngine (called by the shared SessionController on the main thread)
 
+    /** publishData is a suspend call, hence the launch; the controller does not wait for delivery. */
     override fun sendMessage(json: String, reliable: Boolean) {
         log("→ $json")
         scope.launch {
@@ -185,6 +207,10 @@ object PocSession : ScreenShareEngine {
         }
     }
 
+    /**
+     * Android needs a fresh MediaProjection consent per capture, and only an Activity can show it.
+     * Without a visible Activity there is no way to ask, so the session ends.
+     */
     override fun startCapture(mode: CaptureMode) {
         val ask = requestProjection
         if (ask == null) {
@@ -233,15 +259,9 @@ object PocSession : ScreenShareEngine {
         }
     }
 
+    /** Full display size scaled so the long side is [longSide], rounded down to even numbers (video encoders need even sizes). */
     private fun frameSize(longSide: Int): Pair<Int, Int> {
-        val windowManager = app.getSystemService(Context.WINDOW_SERVICE) as android.view.WindowManager
-        val (w, h) = if (Build.VERSION.SDK_INT >= 30) {
-            windowManager.maximumWindowMetrics.bounds.let { it.width() to it.height() }
-        } else {
-            val metrics = android.util.DisplayMetrics()
-            @Suppress("DEPRECATION") windowManager.defaultDisplay.getRealMetrics(metrics)
-            metrics.widthPixels to metrics.heightPixels
-        }
+        val (w, h) = fullDisplaySize(app)
         val scale = longSide.toDouble() / maxOf(w, h)
         fun even(v: Double) = (v / 2).toInt() * 2
         return even(w * scale) to even(h * scale)
@@ -274,10 +294,12 @@ object PocSession : ScreenShareEngine {
         }
     }
 
+    /** The pointer overlay lives in the accessibility service, the only part allowed to draw over other apps here. */
     override fun showPointer(x: Double, y: Double) {
         ControlService.instance?.showPointer(x, y)
     }
 
+    /** Control needs the accessibility service, which the driver must enable once in system settings. */
     override fun execute(command: ControlCommand): String? {
         val service = ControlService.instance
             ?: return "remote control is off on the phone (Settings → Accessibility → ScreenShare PoC)"
@@ -286,6 +308,12 @@ object PocSession : ScreenShareEngine {
         return failure
     }
 
+    /** Sends a second, failing acknowledgement for a command that failed after it was accepted. */
+    fun reportLateFailure(commandId: Long, detail: String) {
+        scope.launch { sendMessage(MessageCodec.encode(MsgAck(commandId, false, detail)), true) }
+    }
+
+    /** Logs to [DiagLog] and to the on-screen log. */
     fun log(line: String) {
         DiagLog.log("app", line)
         _log.value = (listOf(line) + _log.value).take(200)

@@ -16,12 +16,15 @@ import java.util.Locale
 
 /** Test-run diagnostics: logcat plus batches to the Mac's `POST /log` (logs/poc.log), like the iOS app. */
 object DiagLog {
+    /** Mac address to send logs to; null until server discovery finds it (lines are buffered meanwhile). */
     @Volatile var host: String? = null
 
+    /** Unsent lines; capped at 2000 so an unreachable Mac cannot grow memory without bound. */
     private val pending = ArrayList<String>()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val time = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
 
+    // One background loop sends the buffer every second instead of one request per line.
     init {
         scope.launch {
             while (true) {
@@ -31,6 +34,7 @@ object DiagLog {
         }
     }
 
+    /** Writes [message] to logcat and queues it for the Mac. */
     fun log(tag: String, message: String) {
         val line = synchronized(time) { "${time.format(Date())} [$tag] $message" }
         Log.i("ScreenSharePoC", line)
@@ -40,6 +44,7 @@ object DiagLog {
         }
     }
 
+    /** Posts the queued lines; on any failure puts them back at the front so order is kept for the next try. */
     private fun flush() {
         val target = host ?: return
         val lines = synchronized(pending) {

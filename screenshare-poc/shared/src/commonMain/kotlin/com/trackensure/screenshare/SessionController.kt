@@ -14,6 +14,9 @@ import kotlin.time.ExperimentalTime
 /**
  * Session rules shared by both platforms: the driver must accept, control needs a second consent,
  * the driver can revoke control or end the session at any time, an unanswered request expires.
+ *
+ * Platform-neutral: all I/O goes through [engine]. [scope] and [now] are injectable so tests can
+ * drive the request timeout with a test dispatcher and a fixed clock.
  */
 @OptIn(ExperimentalTime::class)
 class SessionController(
@@ -26,8 +29,10 @@ class SessionController(
     constructor(engine: ScreenShareEngine) : this(engine, DEFAULT_REQUEST_TIMEOUT_MILLIS)
 
     private val _state = MutableStateFlow<SessionState>(SessionState.Idle)
+    /** Current session state; the platform UI renders from it. */
     val state: StateFlow<SessionState> = _state.asStateFlow()
 
+    /** Expires the current request after [requestTimeoutMillis]; cancelled on accept, decline or end. */
     private var timeoutJob: Job? = null
 
     /** Raw text from the data channel. */
@@ -42,6 +47,7 @@ class SessionController(
         }
     }
 
+    /** Driver tapped Accept: switches to Streaming, tells support, starts capture and sends the first status. */
     fun accept() {
         val requested = _state.value as? SessionState.Requested ?: return
         timeoutJob?.cancel()
@@ -56,6 +62,7 @@ class SessionController(
         sendStatus()
     }
 
+    /** Driver tapped Decline while a request is pending. */
     fun decline() {
         if (_state.value !is SessionState.Requested) return
         timeoutJob?.cancel()
@@ -63,8 +70,10 @@ class SessionController(
         _state.value = SessionState.Ended("Declined")
     }
 
+    /** Driver consented to remote control. */
     fun grantControl() = updateStreaming { it.copy(controlRequested = false, controlEnabled = true) }
 
+    /** Driver refused remote control; viewing continues. */
     fun denyControl() = updateStreaming { it.copy(controlRequested = false) }
 
     /** Turns control off while viewing continues. */
@@ -73,6 +82,7 @@ class SessionController(
     /** The platform reports that capture paused (app in background) or resumed. */
     fun setPaused(paused: Boolean) = updateStreaming { it.copy(paused = paused) }
 
+    /** Driver tapped End; support is notified. */
     fun endByDriver() = finish(reason = "Ended by driver", notifyRemote = true)
 
     /** Lets the UI start over after Ended. */
@@ -86,6 +96,10 @@ class SessionController(
         return Cancellable { job.cancel() }
     }
 
+    /**
+     * A new request is honoured only when no session is active, so a second support request
+     * cannot hijack a running session. Starts the expiry timer.
+     */
     private fun onRequest(message: MsgRequest) {
         val current = _state.value
         if (current !is SessionState.Idle && current !is SessionState.Ended) return
@@ -100,6 +114,10 @@ class SessionController(
         }
     }
 
+    /**
+     * Runs a control command only when the driver has granted control and capture is live.
+     * Every command gets an ack (reliable) so the support page can show success or the reason it failed.
+     */
     private fun onCommand(command: ControlCommand) {
         val streaming = _state.value as? SessionState.Streaming
         val failure = when {
@@ -111,6 +129,7 @@ class SessionController(
         send(MsgAck(command.id, ok = failure == null, detail = failure), reliable = true)
     }
 
+    /** Common end path; [notifyRemote] is false when support itself ended the session. */
     private fun finish(reason: String, notifyRemote: Boolean) {
         val current = _state.value
         if (current is SessionState.Idle || current is SessionState.Ended) return
@@ -120,6 +139,7 @@ class SessionController(
         _state.value = SessionState.Ended(reason)
     }
 
+    /** Applies [change] to a Streaming state and publishes a status only if something actually changed. */
     private fun updateStreaming(change: (SessionState.Streaming) -> SessionState.Streaming) {
         val streaming = _state.value as? SessionState.Streaming ?: return
         val updated = change(streaming)
@@ -128,6 +148,7 @@ class SessionController(
         sendStatus()
     }
 
+    /** Sends one status label to the support page; paused takes priority over a pending control request. */
     private fun sendStatus() {
         val streaming = _state.value as? SessionState.Streaming ?: return
         val label = when {
@@ -146,6 +167,7 @@ class SessionController(
     }
 }
 
+/** Handle returned to Swift by [SessionController.watchState] to stop observing. */
 fun interface Cancellable {
     fun cancel()
 }

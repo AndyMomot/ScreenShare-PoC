@@ -3,12 +3,14 @@ import UIKit
 /// A pass-through window above the app that shows where support is pointing.
 /// It is part of the app's own windows, so the support page sees the pointer echoed in the stream.
 final class PointerOverlay {
+    /// One overlay window per process, created lazily on the first pointer message.
     static let shared = PointerOverlay()
 
     private var window: UIWindow?
     private let dot = UIView(frame: CGRect(x: 0, y: 0, width: 36, height: 36))
     private var hideWork: DispatchWorkItem?
 
+    /// Moves the dot to normalized (x, y) of the window and fades it out 1.5 s after the last move.
     func show(x: Double, y: Double) {
         guard let window = ensureWindow() else { return }
         dot.center = CGPoint(x: x * window.bounds.width, y: y * window.bounds.height)
@@ -21,6 +23,8 @@ final class PointerOverlay {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: work)
     }
 
+    /// Creates the overlay window on first use. It sits above alerts so the dot is never hidden, and ignores
+    /// touches so the driver (and remote taps) reach the app underneath.
     private func ensureWindow() -> UIWindow? {
         if let window { return window }
         guard let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first else {

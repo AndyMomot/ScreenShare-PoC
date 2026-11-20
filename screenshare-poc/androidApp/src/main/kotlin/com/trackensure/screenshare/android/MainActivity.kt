@@ -32,20 +32,26 @@ import kotlinx.coroutines.launch
 class MainActivity : Activity() {
 
     private val scope = MainScope()
+    /** This instance's consent callback, kept so onDestroy can tell it apart from a newer one. */
+    private val projectionRequest: (CaptureMode) -> Unit = { mode -> askProjection(mode) }
     private lateinit var status: TextView
     private lateinit var controlStatus: TextView
     private lateinit var endButton: Button
     private lateinit var controlOffButton: Button
     private lateinit var log: TextView
+    /** Open consent dialogs, kept so a state change (timeout, end from support) can dismiss them. */
     private var requestDialog: AlertDialog? = null
     private var controlDialog: AlertDialog? = null
+    /** Taps on the demo button, to check remote taps land where support clicked. */
     private var counter = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        PocSession.requestProjection = { mode -> askProjection(mode) }
+        // Register as the one place that can show the system capture-consent dialog.
+        PocSession.requestProjection = projectionRequest
         setContentView(buildLayout())
 
+        // Without this permission the mandatory sharing notification is hidden on Android 13+.
         if (Build.VERSION.SDK_INT >= 33) requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
 
         scope.launch {
@@ -54,6 +60,7 @@ class MainActivity : Activity() {
         scope.launch { PocSession.log.collect { log.text = it.joinToString("\n") } }
     }
 
+    /** Re-checks the accessibility service on every return, e.g. after the driver comes back from Settings. */
     override fun onResume() {
         super.onResume()
         val on = ControlService.instance != null
@@ -62,13 +69,15 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
-        if (PocSession.requestProjection != null) PocSession.requestProjection = null
+        // Clear only our own callback: a newer instance may already have registered its own.
+        if (PocSession.requestProjection === projectionRequest) PocSession.requestProjection = null
         scope.cancel()
         super.onDestroy()
     }
 
     // MARK: capture consent
 
+    /** Opens the system screen-capture consent; the answer arrives in [onActivityResult]. */
     private fun askProjection(mode: CaptureMode) {
         val manager = getSystemService(MediaProjectionManager::class.java)
         val intent = if (Build.VERSION.SDK_INT >= 34) {
@@ -83,6 +92,7 @@ class MainActivity : Activity() {
         startActivityForResult(intent, REQUEST_PROJECTION)
     }
 
+    /** Hands the capture consent result to the session; a cancelled dialog is passed on as null. */
     @Deprecated("Activity result API is enough for a single request here")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         @Suppress("DEPRECATION")
@@ -94,6 +104,7 @@ class MainActivity : Activity() {
 
     // MARK: rendering
 
+    /** Redraws status and buttons from link + session state, and shows or dismisses the consent dialogs. */
     private fun render(link: PocSession.Link, state: SessionState) {
         val linkText = when (link) {
             PocSession.Link.SEARCHING -> "Looking for the support server…"
@@ -119,6 +130,7 @@ class MainActivity : Activity() {
         if (streaming?.controlRequested == true) showControlRequest() else { controlDialog?.dismiss(); controlDialog = null }
     }
 
+    /** Viewing consent; not cancelable so the driver must answer explicitly (or the request times out). */
     private fun showRequest(state: SessionState.Requested) {
         if (requestDialog?.isShowing == true) return
         val what = if (state.mode == CaptureMode.DEVICE) "your whole screen" else "this app"
@@ -131,6 +143,7 @@ class MainActivity : Activity() {
             .show()
     }
 
+    /** Control consent; if the accessibility service is off, offers a shortcut to turn it on. */
     private fun showControlRequest() {
         if (controlDialog?.isShowing == true) return
         val serviceOn = ControlService.instance != null
@@ -153,6 +166,7 @@ class MainActivity : Activity() {
 
     // MARK: layout
 
+    /** Builds the screen in code (no XML layouts) to keep the app to a few files. */
     private fun buildLayout(): View {
         val padding = (16 * resources.displayMetrics.density).toInt()
         status = TextView(this).apply { textSize = 18f; setTypeface(typeface, Typeface.BOLD) }
@@ -195,13 +209,20 @@ class MainActivity : Activity() {
             setBackgroundColor(Color.WHITE)
             // Edge-to-edge is enforced from Android 15: keep the content clear of the status and nav bars.
             setOnApplyWindowInsetsListener { view, insets ->
-                val bars = insets.getInsets(android.view.WindowInsets.Type.systemBars())
-                view.setPadding(0, bars.top, 0, bars.bottom)
+                // WindowInsets.Type exists from Android 11; older versions use the deprecated getters.
+                if (Build.VERSION.SDK_INT >= 30) {
+                    val bars = insets.getInsets(android.view.WindowInsets.Type.systemBars())
+                    view.setPadding(0, bars.top, 0, bars.bottom)
+                } else {
+                    @Suppress("DEPRECATION")
+                    view.setPadding(0, insets.systemWindowInsetTop, 0, insets.systemWindowInsetBottom)
+                }
                 insets
             }
         }
     }
 
+    /** Small gray section title. */
     private fun header(text: String) = TextView(this).apply {
         this.text = text
         textSize = 13f
@@ -209,6 +230,7 @@ class MainActivity : Activity() {
         setPadding(0, (20 * resources.displayMetrics.density).toInt(), 0, 4)
     }
 
+    /** Plain button with normal-case title. */
     private fun button(title: String, onClick: () -> Unit) =
         Button(this).apply { text = title; isAllCaps = false; setOnClickListener { onClick() } }
 

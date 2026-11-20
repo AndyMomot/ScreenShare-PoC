@@ -6,14 +6,17 @@ import Network
 final class ServerDiscovery {
     static let serviceType = "_screensharepoc._tcp"
 
+    /// Bonjour service name and the LAN address taken from the TXT record.
     struct Server: Equatable {
         let name: String
         let host: String
     }
 
+    /// Called on the main queue with the first usable server, or nil when none is announced.
     var onChange: ((Server?) -> Void)?
     private var browser: NWBrowser?
 
+    /// Starts browsing; safe to call repeatedly.
     func start() {
         guard browser == nil else { return }
         let browser = NWBrowser(for: .bonjourWithTXTRecord(type: Self.serviceType, domain: nil), using: .tcp)
@@ -32,11 +35,13 @@ final class ServerDiscovery {
         self.browser = browser
     }
 
+    /// Cancels browsing; `start()` can be called again later.
     func stop() {
         browser?.cancel()
         browser = nil
     }
 
+    /// A result is usable only if it carries a non-empty `host` in its TXT record.
     private static func server(from result: NWBrowser.Result) -> Server? {
         guard case let .bonjour(txt) = result.metadata, let host = txt.dictionary["host"], !host.isEmpty else { return nil }
         guard case let .service(name, _, _, _) = result.endpoint else { return nil }

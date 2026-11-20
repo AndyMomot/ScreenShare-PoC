@@ -11,6 +11,7 @@ enum StreamProfile: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
+    /// Label for the profile picker.
     var title: String {
         switch self {
         case .smooth: "Smooth · 720p 30fps"
@@ -19,6 +20,7 @@ enum StreamProfile: String, CaseIterable, Identifiable {
         }
     }
 
+    /// Capture size and frame rate passed to LiveKit's capture options.
     var captureOptions: (dimensions: Dimensions, fps: Int) {
         switch self {
         case .smooth: (.h720_169, 30)
@@ -27,7 +29,6 @@ enum StreamProfile: String, CaseIterable, Identifiable {
         }
     }
 
-    /// H.264 is encoded by the hardware encoder; VP8 (WebRTC's fallback) is software and adds latency and heat.
     /// Longest side of the frame we send in app mode (portrait screen: this is the height).
     var maxLongSide: Int {
         switch self {
@@ -37,6 +38,8 @@ enum StreamProfile: String, CaseIterable, Identifiable {
         }
     }
 
+    /// Encoder settings per profile; `degradationPreference` decides what WebRTC sacrifices first when bandwidth drops.
+    /// H.264 is encoded by the hardware encoder; VP8 (WebRTC's fallback) is software and adds latency and heat.
     var publishOptions: VideoPublishOptions {
         switch self {
         case .smooth:

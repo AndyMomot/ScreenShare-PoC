@@ -6,19 +6,27 @@ import crypto from 'node:crypto';
 
 const API_KEY = 'devkey';
 const API_SECRET = 'secret';
+// Port 8080 is hard-coded in both apps (token and /log requests) and announced over Bonjour by run.sh.
 const PORT = 8080;
 
 // Diagnostics: the app and the page POST their log lines here; one file for the whole test run.
 const LOG_FILE = new URL('../logs/poc.log', import.meta.url);
 await mkdir(new URL('../logs/', import.meta.url), { recursive: true });
+// Appends are chained so concurrent batches never interleave inside the file.
 let logChain = Promise.resolve();
 function writeLog(source, lines) {
   const text = lines.map((line) => `${new Date().toISOString()} [${source}] ${line}\n`).join('');
   logChain = logChain.then(() => appendFile(LOG_FILE, text)).catch(() => {});
 }
 
+// JWT segments use unpadded base64url.
 const b64url = (value) => Buffer.from(value).toString('base64url');
 
+/**
+ * Builds a LiveKit access token by hand (HS256 JWT) so the server needs no npm dependencies.
+ * Grants join, publish, subscribe and data in one room for 6 hours; nbf is backdated 10 s
+ * to tolerate small clock differences between this Mac and the phones.
+ */
 function accessToken({ identity, name, room }) {
   const now = Math.floor(Date.now() / 1000);
   const header = b64url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
@@ -34,6 +42,10 @@ function accessToken({ identity, name, room }) {
   return `${header}.${payload}.${signature}`;
 }
 
+/**
+ * Routes: OPTIONS (CORS preflight for the page's JSON log posts), POST /log, GET /token, GET / (support page).
+ * Listens on all interfaces so phones on the LAN can reach it.
+ */
 http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   if (req.method === 'OPTIONS') {

@@ -1,8 +1,10 @@
 import Shared
 import SwiftUI
 
+/// Session tab: connection status, per-session settings, manual server override and the event log.
 struct SessionView: View {
     @EnvironmentObject private var session: SessionViewModel
+    /// Text field draft; applied to `manualHost` only on Return, so typing does not reconnect on every keystroke.
     @State private var hostDraft = ""
 
     var body: some View {
@@ -15,6 +17,7 @@ struct SessionView: View {
                 }
 
                 Section {
+                    // Quality and capture API are read when capture starts, so they are locked during a session.
                     Picker("Stream quality", selection: $session.profile) {
                         ForEach(StreamProfile.allCases) { Text($0.title).tag($0) }
                     }
@@ -23,6 +26,7 @@ struct SessionView: View {
                         ForEach(CaptureAPI.allCases) { Text($0.title).tag($0) }
                     }
                     .disabled(session.streaming != nil)
+                    // Control mode is read per command, so it can change mid-session.
                     Picker("Remote control", selection: $session.controlMode) {
                         ForEach(ControlMode.allCases) { Text($0.title).tag($0) }
                     }
@@ -85,6 +89,7 @@ private struct StatusCard: View {
         .animation(.default, value: title)
     }
 
+    /// Spinner only while the link is in a transitional state and no session or request needs attention.
     private var showsProgress: Bool {
         guard session.streaming == nil, session.requested == nil else { return false }
         switch session.link {
@@ -93,6 +98,7 @@ private struct StatusCard: View {
         }
     }
 
+    /// Session state takes priority over link state in all four properties below.
     private var title: String {
         if let streaming = session.streaming {
             return streaming.paused ? "Session paused" : (streaming.controlEnabled ? "Support is controlling" : "Support is viewing")

@@ -2,6 +2,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Needed on Android 13+ to show the ongoing screen-sharing notification. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- Local PoC: token server and media server are plain http/ws on the Mac. -->

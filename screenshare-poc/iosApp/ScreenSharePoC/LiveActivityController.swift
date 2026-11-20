@@ -6,6 +6,7 @@ import UIKit
 /// Mirrors the session into a Live Activity, so the driver sees it in the Dynamic Island and on the
 /// Lock Screen and can end it from there. Started when sharing begins (the app is in front then).
 final class LiveActivityController {
+    /// The activity started by this run; nil when none is shown.
     private var activity: Activity<SupportSessionAttributes>?
 
     /// iOS keeps a Live Activity on screen for hours after the app is killed, while the session and the
@@ -35,6 +36,7 @@ final class LiveActivityController {
     private func endAllNow() {
         let all = Activity<SupportSessionAttributes>.activities
         guard !all.isEmpty else { return }
+        // Blocking the main thread is acceptable here: the process is exiting, and the wait is capped at 1 s.
         let done = DispatchSemaphore(value: 0)
         Task.detached {
             for item in all { await item.end(nil, dismissalPolicy: .immediate) }
@@ -43,7 +45,9 @@ final class LiveActivityController {
         _ = done.wait(timeout: .now() + 1)
     }
 
-    func update(for state: SessionState) {
+    /// Called on every session state change: ends the activity outside Streaming, otherwise updates the
+    /// existing one or starts it on the first Streaming state.
+    func update(for state: SessionState, supportName: String) {
         guard let streaming = state as? SessionStateStreaming else {
             end()
             return
@@ -62,7 +66,7 @@ final class LiveActivityController {
             return
         }
         let attributes = SupportSessionAttributes(
-            supportName: "Support",
+            supportName: supportName,
             wholeDevice: streaming.mode == CaptureMode.device,
             startedAt: Date()
         )
@@ -74,6 +78,7 @@ final class LiveActivityController {
         }
     }
 
+    /// Ends this run's activity; the end is delivered asynchronously.
     private func end() {
         guard let activity else { return }
         self.activity = nil

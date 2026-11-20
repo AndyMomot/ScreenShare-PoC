@@ -1,6 +1,8 @@
 import Shared
 import SwiftUI
 
+/// Top-level screen: three tabs, the session banner above them, and the two consent prompts
+/// (viewing request as a sheet, control request as an alert) driven by the session state.
 struct RootView: View {
     @EnvironmentObject private var session: SessionViewModel
 
@@ -28,10 +30,12 @@ struct RootView: View {
         }
     }
 
+    /// Sheet is shown purely from state; the setter is a no-op because only Accept/Decline (or timeout) close it.
     private var requestPresented: Binding<Bool> {
         Binding(get: { session.requested != nil }, set: { _ in })
     }
 
+    /// If the alert goes away without an answer while the request is still pending, treat it as Deny.
     private var controlRequestPresented: Binding<Bool> {
         Binding(
             get: { session.streaming?.controlRequested == true },
@@ -67,6 +71,7 @@ struct SessionBanner: View {
     }
 }
 
+/// Viewing consent with the capture mode and a live countdown to the request deadline.
 struct RequestView: View {
     @EnvironmentObject private var session: SessionViewModel
 
@@ -80,6 +85,7 @@ struct RequestView: View {
                 Text(request.mode == CaptureMode.device ? "Mode: whole device" : "Mode: this app only")
                     .foregroundStyle(.secondary)
                 TimelineView(.periodic(from: .now, by: 1)) { context in
+                    // deadlineMillis is epoch milliseconds from the shared controller.
                     let left = max(0, Int(Double(request.deadlineMillis) / 1000 - context.date.timeIntervalSince1970))
                     Text("Request expires in \(left) s").monospacedDigit()
                 }

@@ -4,14 +4,17 @@ import Foundation
 
 /// What the Live Activity shows: compiled into the app and into the widget extension.
 struct SupportSessionAttributes: ActivityAttributes {
+    /// What support can currently do: only watch, watch and control, or nothing (sharing paused by iOS).
     enum Phase: String, Codable, Hashable {
         case viewing, control, paused
     }
 
+    /// The part that changes during the session and is pushed with `Activity.update`.
     struct ContentState: Codable, Hashable {
         var phase: Phase
     }
 
+    /// Fixed for the activity's lifetime: who is watching, app vs whole-device capture, start time for the timer.
     var supportName: String
     var wholeDevice: Bool
     var startedAt: Date
@@ -34,6 +37,7 @@ struct EndSupportSessionIntent: LiveActivityIntent {
     }
 }
 
+/// Posted in the app process when the driver taps End in the Live Activity; `SessionViewModel` observes it.
 extension Notification.Name {
     static let endSupportSessionFromActivity = Notification.Name("endSupportSessionFromActivity")
 }

@@ -6,6 +6,7 @@ import WebKit
 
 /// The kinds of UI the ELD app has, to check what support sees and can control.
 struct DemoScreensView: View {
+    // Each presented UI lives in its own window/layer on iOS; these check what capture and control can reach.
     @State private var showAlert = false
     @State private var showSheet = false
     @State private var showDialog = false
@@ -52,6 +53,7 @@ struct DemoScreensView: View {
     }
 }
 
+/// SwiftUI and UIKit controls side by side: remote taps reach them through different code paths in CommandExecutor.
 struct TapTargetsScreen: View {
     @State private var swiftUITaps = 0
     @State private var toggle = false
@@ -70,6 +72,7 @@ struct TapTargetsScreen: View {
     }
 }
 
+/// Plain UIButton with its own tap counter, to verify UIKit control events from remote taps.
 private struct UIKitButton: UIViewRepresentable {
     func makeUIView(context: Context) -> UIButton {
         let button = UIButton(configuration: .filled())
@@ -85,6 +88,7 @@ private struct UIKitButton: UIViewRepresentable {
     func updateUIView(_ uiView: UIButton, context: Context) {}
 }
 
+/// Masking demo: the secure fields are blacked out in the stream, the login field is not.
 struct LoginFormScreen: View {
     @State private var login = ""
     @State private var password = ""
@@ -100,6 +104,7 @@ struct LoginFormScreen: View {
     }
 }
 
+/// Web content: a button and an input inside WKWebView, which UIKit hit-testing alone cannot press or fill.
 struct WebViewScreen: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let view = WKWebView()
@@ -117,11 +122,13 @@ struct WebViewScreen: UIViewRepresentable {
     func updateUIView(_ uiView: WKWebView, context: Context) {}
 }
 
+/// Live camera preview, to see how full-motion video survives the capture and encoding.
 struct CameraPreviewScreen: UIViewRepresentable {
     func makeUIView(context: Context) -> CameraPreviewUIView { CameraPreviewUIView() }
     func updateUIView(_ uiView: CameraPreviewUIView, context: Context) {}
 }
 
+/// View whose backing layer is the camera preview layer.
 final class CameraPreviewUIView: UIView {
     private let session = AVCaptureSession()
 
@@ -133,6 +140,7 @@ final class CameraPreviewUIView: UIView {
         (layer as? AVCaptureVideoPreviewLayer)?.videoGravity = .resizeAspectFill
         AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
             guard granted, let self else { return }
+            // startRunning blocks, so it must not run on the main thread.
             DispatchQueue.global(qos: .userInitiated).async { self.configure() }
         }
     }
@@ -150,6 +158,7 @@ final class CameraPreviewUIView: UIView {
     }
 }
 
+/// Long scrolling list, to try remote swipes.
 struct LongListScreen: View {
     var body: some View {
         List(0..<200, id: \.self) { index in
@@ -159,6 +168,7 @@ struct LongListScreen: View {
     }
 }
 
+/// System document scanner (a separate full-screen controller), closed on cancel, finish or error.
 struct DocumentScannerView: UIViewControllerRepresentable {
     let onFinish: () -> Void
 

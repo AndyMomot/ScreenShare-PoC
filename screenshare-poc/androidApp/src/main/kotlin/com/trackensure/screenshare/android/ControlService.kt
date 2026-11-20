@@ -13,7 +13,6 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.util.DisplayMetrics
 import android.view.View
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
@@ -33,11 +32,13 @@ import com.trackensure.screenshare.ControlCommand
 class ControlService : AccessibilityService() {
 
     companion object {
+        /** The running service, or null while the driver has it turned off; PocSession reaches it through this. */
         @Volatile var instance: ControlService? = null
             private set
     }
 
     private var pointer: PointerView? = null
+    /** Main-thread handler used to hide the pointer after a pause in pointer moves. */
     private val main = Handler(Looper.getMainLooper())
 
     override fun onServiceConnected() {
@@ -52,6 +53,7 @@ class ControlService : AccessibilityService() {
         return super.onUnbind(intent)
     }
 
+    // The service only acts on commands; it does not need to react to accessibility events.
     override fun onAccessibilityEvent(event: AccessibilityEvent?) = Unit
     override fun onInterrupt() = Unit
 
@@ -63,7 +65,8 @@ class ControlService : AccessibilityService() {
                 val x = (command.x * width).toFloat()
                 val y = (command.y * height).toFloat()
                 DiagLog.log("control", "tap at (${x.toInt()}, ${y.toInt()}) of ${width}×$height")
-                gesture(Path().apply { moveTo(x, y) }, 60)
+                // A tap is a stroke of a single point held for 60 ms.
+                gesture(Path().apply { moveTo(x, y) }, 60, command.id)
             }
             is CmdSwipe -> {
                 val path = Path().apply {
@@ -71,7 +74,7 @@ class ControlService : AccessibilityService() {
                     lineTo((command.x2 * width).toFloat(), (command.y2 * height).toFloat())
                 }
                 DiagLog.log("control", "swipe ${command.ms} ms")
-                gesture(path, command.ms.coerceIn(50, 2000))
+                gesture(path, command.ms.coerceIn(50, 2000), command.id)
             }
             is CmdText -> typeText(command.value)
             is CmdBack -> if (performGlobalAction(GLOBAL_ACTION_BACK)) null else "back failed"
@@ -79,17 +82,27 @@ class ControlService : AccessibilityService() {
         }
     }
 
-    private fun gesture(path: Path, durationMs: Long): String? {
+    /**
+     * Dispatches one stroke. The result only says whether the system accepted the gesture;
+     * it is performed asynchronously, so a later cancellation is just logged.
+     */
+    private fun gesture(path: Path, durationMs: Long, commandId: Long): String? {
         val stroke = GestureDescription.StrokeDescription(path, 0, durationMs)
         val gesture = GestureDescription.Builder().addStroke(stroke).build()
         val accepted = dispatchGesture(gesture, object : GestureResultCallback() {
             override fun onCancelled(gestureDescription: GestureDescription?) {
                 DiagLog.log("control", "gesture cancelled by the system")
+                // The command was already acknowledged as accepted; correct it for the support page.
+                PocSession.reportLateFailure(commandId, "gesture cancelled by the system")
             }
         }, null)
         return if (accepted) null else "gesture rejected"
     }
 
+    /**
+     * ACTION_SET_TEXT replaces the whole field, so the new text is appended to the current content.
+     * A field showing only its hint counts as empty, otherwise the hint would be kept as text.
+     */
     private fun typeText(value: String): String? {
         val node = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
             ?: return "no focused text field (tap a field first)"
@@ -103,20 +116,11 @@ class ControlService : AccessibilityService() {
     }
 
     /** Full display size: MediaProjection captures the whole display, bars included. */
-    private fun screenSize(): Pair<Int, Int> {
-        val windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        return if (Build.VERSION.SDK_INT >= 30) {
-            val bounds = windowManager.currentWindowMetrics.bounds
-            bounds.width() to bounds.height()
-        } else {
-            val metrics = DisplayMetrics()
-            @Suppress("DEPRECATION") windowManager.defaultDisplay.getRealMetrics(metrics)
-            metrics.widthPixels to metrics.heightPixels
-        }
-    }
+    private fun screenSize(): Pair<Int, Int> = fullDisplaySize(this)
 
     // MARK: pointer — an accessibility overlay draws over every app without the "draw over apps" permission.
 
+    /** Adds the overlay on first use, moves the dot and hides it 1.5 s after the last move. */
     fun showPointer(x: Double, y: Double) {
         val view = pointer ?: PointerView(this).also { view ->
             val params = WindowManager.LayoutParams(
@@ -136,11 +140,13 @@ class ControlService : AccessibilityService() {
         main.postDelayed({ view.move(null, null) }, 1500)
     }
 
+    /** Removes the overlay window when the service is unbound. */
     private fun removePointer() {
         pointer?.let { runCatching { (getSystemService(Context.WINDOW_SERVICE) as WindowManager).removeView(it) } }
         pointer = null
     }
 
+    /** Full-screen, untouchable view that draws one red dot; null coordinates hide it. */
     private class PointerView(context: Context) : View(context) {
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(200, 255, 59, 48) }
         private var px: Float? = null

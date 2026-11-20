@@ -8,12 +8,15 @@ import UIKit
 final class SupportMask {
     static let shared = SupportMask()
 
+    /// Masked areas keyed by the view that registered them. Written on the main thread by SwiftUI,
+    /// read on the capture queue for every frame, hence the lock.
     private var rects: [UUID: CGRect] = [:]
     private var appActive = true
     private let lock = NSLock()
 
     private init() {
         let center = NotificationCenter.default
+        // Track foreground state: the app's own rects mean nothing once another app covers the screen.
         center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: nil) { [weak self] _ in
             self?.setActive(true)
         }
@@ -22,6 +25,7 @@ final class SupportMask {
         }
     }
 
+    /// Registers, moves (non-nil) or removes (nil) the mask area of one view.
     func set(_ id: UUID, _ rect: CGRect?) {
         lock.lock(); defer { lock.unlock() }
         rects[id] = rect
@@ -46,6 +50,7 @@ final class SupportMask {
         let width = CVPixelBufferGetWidth(buffer), height = CVPixelBufferGetHeight(buffer)
         let sx = Double(width) / screen.width, sy = Double(height) / screen.height
         let fullRange = CVPixelBufferGetPixelFormatType(buffer) == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+        // Video-range luma starts at 16, so 0 would be out of range there; neutral chroma (128) makes it gray-free black.
         let black: UInt8 = fullRange ? 0 : 16
 
         for rect in rects {
@@ -68,6 +73,8 @@ final class SupportMask {
     }
 }
 
+/// Reports the view's global frame to `SupportMask` while it is on screen and removes it when it disappears.
+/// The frame is in window points, which match the screen points the frame pipeline scales from.
 private struct HiddenFromSupport: ViewModifier {
     @State private var id = UUID()
 
